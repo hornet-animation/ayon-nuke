@@ -226,7 +226,7 @@ def assemble_publish_path(ayon_write_node):
     # New get version
     versions = get_pub_version(project_name, name, context["folder_path"])
 
-    publish_path = pathlib.PurePosixPath(
+    publish_path = pathlib.Path(
         directory_template.format_map(
             {
                 "root": {"work": root},
@@ -297,7 +297,7 @@ def assemble_publish_path(ayon_write_node):
     result = publish_path / file_string
     log.debug(f"Assembled publish path:{result}")
 
-    return str(result)
+    return result
 
 
 def read_from_publish(ayon_write_node):
