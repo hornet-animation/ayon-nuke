@@ -27,6 +27,11 @@ from ayon_nuke.api.lib import (
     dirmap_file_name_filter,
     add_scripts_gizmo,
     create_write_node,
+    INSTANCE_DATA_KNOB,
+    get_pub_version, 
+    incriment_pub_version, 
+    is_version_file_linked, 
+    get_version_from_path
 )
 from ayon_core.settings import get_project_settings
 from ayon_core.tools.utils.host_tools import show_publisher
@@ -177,6 +182,7 @@ def embedOptions():
     
     nde = nuke.thisNode()
     knb = nuke.thisKnob()
+
     # log.info(' knob of type' + str(knb.Class()))
     htab = nuke.Tab_Knob("htab", "Hornet")
     htab.setName("htab")
@@ -313,6 +319,14 @@ def embedOptions():
         "",
         "- all rendered files are TEMPORARY and WILL BE OVERWRITTEN unless published ",
     )
+
+    ovswarn = nuke.Text_Knob(
+        "ovswarn",
+        "",
+        "- This node is for writing where the pipeline steps needs to be bypassed due to an incredibly long or large render."
+
+    )
+
     concurrent_warning = nuke.Text_Knob(
         "concurrent_warning", "", "<-- Set to 1 for heavy scripts"
     )
@@ -332,11 +346,18 @@ def embedOptions():
     deadlineChunkSize.clearFlag(nuke.STARTLINE)  # Don't start a new line
 #    concurrentTasks.clearFlag(nuke.STARTLINE)
     concurrent_warning.clearFlag(nuke.STARTLINE)
+    
+    # Expose publish knobs based on emergency status
+    data = json.loads(group.knobs()["publish_instance"].value().replace("JSON:::","",1))
+    is_ovs = data["is_ovs"]
 
     group.addKnob(render_local_button)
-    group.addKnob(readfrom)
-    group.addKnob(clear_temp_outputs_button)
-    group.addKnob(navigate_to_render_button)
+
+    if not is_ovs:
+        group.addKnob(readfrom)
+        group.addKnob(clear_temp_outputs_button)
+        group.addKnob(navigate_to_render_button)
+
     group.addKnob(deadlinediv)
     group.addKnob(deadlinePriority)
     group.addKnob(deadlineChunkSize)
@@ -349,7 +370,12 @@ def embedOptions():
     group.addKnob(publish_button)
     group.addKnob(read_from_publish_button)
     group.addKnob(navigate_to_publish_button)
-    group.addKnob(tempwarn)
+
+    if is_ovs is False:
+        group.addKnob(tempwarn)
+
+    else:
+        group.addKnob(ovswarn)
 
     endGroup = nuke.Tab_Knob("endpipeline", None, nuke.TABENDGROUP)
 
@@ -361,101 +387,12 @@ def quick_write_node(family="render"):
     _quick_write_node(variant, family)
 
 
-# def _quick_write_node(variant, family="render"):
-#     """
-#     Separated this from the nuke.getInput call to allow calls from other scripts,
-#     such as a loop in the Kroger versioning script
-#     """
-
-#     variant = variant.title()
-
-#     print("quick write node")
-#     nuke.tprint("quick write node")
-
-#     if "/" in os.environ["AYON_FOLDER_PATH"]:
-#         ayon_asset_name = os.environ["AYON_FOLDER_PATH"].split("/")[-1]
-#     else:
-#         ayon_asset_name = os.environ["AYON_FOLDER_PATH"]
-
-#     if any(
-#         var is None or var == ""
-#         for var in [os.environ["AYON_TASK_NAME"], ayon_asset_name]
-#     ):
-#         nuke.alert(
-#             "missing AYON_TASK_NAME and AYON_FOLDER_PATH, can't make quick write"
-#         )
-
-#     # variant = nuke.getInput('Variant for Quick Write Node','Main').title()
-#     variant = "_" + variant if variant[0] != "_" else variant
-#     if variant == "_" or variant == None or variant == "":
-#         nuke.message("No Variant Specified, will not create Write Node")
-#         return
-#     for nde in nuke.allNodes("Write"):
-#         if (
-#             nde.knob("name").value()
-#             == family + os.environ["AYON_TASK_NAME"] + variant
-#         ):
-#             nuke.message("Write Node already exists")
-#             return
-#     data = {
-#         "subset": family + os.environ["AYON_TASK_NAME"] + variant,
-#         "variant": variant,
-#         "id": "pyblish.avalon.instance",
-#         "creator": f"create_write_{family}",
-#         "creator_identifier": f"create_write_{family}",
-#         "folderPath": ayon_asset_name,
-#         "task": os.environ["AYON_TASK_NAME"],
-#         "productType": family,
-#         "task": {"name": os.environ["AYON_TASK_NAME"]},
-#         "productName": family + os.environ["AYON_TASK_NAME"] + variant,
-#         "hierarchy": "/".join(os.environ["AYON_FOLDER_PATH"].split("/")[:-1]),
-#         "folder": {"name": os.environ["AYON_FOLDER_PATH"].split("/")[-1]},
-#         "fpath_template": "{work}/renders/nuke/{subset}/{subset}.{frame}.{ext}",
-#     }
-#     qnode = create_write_node(
-#         family + os.environ["AYON_TASK_NAME"] + variant,
-#         data,
-#         prerender=True if family == "prerender" else False,
-#     )
-#     qnode = nuke.toNode(family + os.environ["AYON_TASK_NAME"] + variant)
-#     print(f"Created Write Node: {qnode.name()}")
-#     api.set_node_data(qnode, api.INSTANCE_DATA_KNOB, data)
-#     instance_data = json.loads(qnode.knob(api.INSTANCE_DATA_KNOB).value()[7:])
-#     instance_data.pop("version", None)
-#     instance_data["task"] = os.environ["AYON_TASK_NAME"]
-#     instance_data["creator_attributes"] = {
-#         "render_taget": "frames_farm",
-#         "review": True,
-#     }
-#     instance_data["publish_attributes"] = {
-#         "CollectFramesFixDef": {"frames_to_fix": "", "rewrite_version": False},
-#         "ValidateCorrectAssetContext": {"active": True},
-#         "NukeSubmitDeadline": {
-#             "priority": 95,
-#             "chunk": 1,
-#             "concurrency": 1,
-#             "use_gpu": True,
-#             "suspend_publish": False,
-#             "workfile_dependency": True,
-#             "use_published_workfile": True,
-#         },
-#     }
-#     qnode.knob(api.INSTANCE_DATA_KNOB).setValue(
-#         "JSON:::" + json.dumps(instance_data)
-#     )
-#     if family == "prerender":
-#         qnode.knob("tile_color").setValue(2880113407)
-#     with qnode.begin():
-#         inside_write = nuke.toNode(
-#             "inside_" + family + os.environ["AYON_TASK_NAME"] + variant.title()
-#         )
-#         inside_write.knob("file_type").setValue("exr")
-
-#     return qnode
+def ovs_write_node(family="render"):
+    variant = nuke.getInput("Variant for Emergency Write Node", "Main").title()
+    _quick_write_node(variant, family, is_ovs=True)
 
 
-
-def _quick_write_node(variant, family="render"):
+def _quick_write_node(variant, family="render",is_ovs=False):
     """
     Separated this from the nuke.getInput call to allow calls from other scripts,
     such as a loop in the Kroger versioning script
@@ -466,11 +403,7 @@ def _quick_write_node(variant, family="render"):
         nuke.message("You must save script first")
         return
     
-
-
     variant = variant.title()
-
-    
 
     nuke.tprint("quick write node")
 
@@ -481,7 +414,6 @@ def _quick_write_node(variant, family="render"):
 
     # ayon_asset_name = os.environ["AYON_FOLDER_PATH"]
     folder_path = os.environ["AYON_FOLDER_PATH"]
-    print(folder_path)
     print(type(folder_path))
 
 
@@ -519,11 +451,12 @@ def _quick_write_node(variant, family="render"):
         "hierarchy": "/".join(os.environ["AYON_FOLDER_PATH"].split("/")[:-1]),
         "folder": {"name": os.environ["AYON_FOLDER_PATH"].split("/")[-1]},
         "fpath_template": "{work}/renders/nuke/{subset}/{subset}.{frame}.{ext}",
+        "is_ovs":is_ovs
     }
     qnode = create_write_node(
         family + os.environ["AYON_TASK_NAME"] + variant,
         data,
-        prerender=True if family == "prerender" else False,
+        prerender=True if family == "prerender" else False
     )
     qnode = nuke.toNode(family + os.environ["AYON_TASK_NAME"] + variant)
     print(f"Created Write Node: {qnode.name()}")
@@ -559,7 +492,6 @@ def _quick_write_node(variant, family="render"):
             "inside_" + family + os.environ["AYON_TASK_NAME"] + variant.title()
         )
         inside_write.knob("file_type").setValue("exr")
-
 
 
     return qnode
@@ -600,6 +532,37 @@ def enable_publish_range():
         nde.knob("publishLast").setEnabled(False)
 
 
+def set_hwrite_version():
+    """
+    Set the version of quickwrite filepaths based on latest target version. 
+    """
+
+    nodes = nuke.allNodes()
+    for node in nodes:
+        if INSTANCE_DATA_KNOB in node.knobs():
+            data = json.loads(node[INSTANCE_DATA_KNOB].value().replace("JSON:::","",1))
+            if data["is_ovs"]:
+                fpath = node["File output"].value()  
+                if is_version_file_linked():
+                    node_ver = "v"+get_version_from_path(fpath)
+                    file_ver = "v"+get_version_from_path(nuke.Root().name())
+                    fpath_new = fpath.replace(node_ver,file_ver)
+
+                else:
+                    versions = get_pub_version(data["project"]["name"],data["productName"],data["folderPath"])
+                    inc_versions = incriment_pub_version(versions[0], versions[1])
+                    fpath_new = fpath.replace(versions[1],inc_versions[1])
+
+                node_name = node["name"].value()
+                interior_write = "inside_"+node_name
+                node.begin()
+                wnode = nuke.toNode(interior_write)
+                wnode["file"].setValue(fpath_new)
+                node["File output"].setValue(fpath_new)
+                log.info(f"Updating ovs write path for {node_name}")
+                node.end()
+
+
 hornet_menu = nuke.menu("Nuke")
 m = hornet_menu.addMenu("&Hornet")
 m.addCommand("&Quick Write Node", "quick_write_node()", "Ctrl+W")
@@ -608,11 +571,14 @@ m.addCommand(
     "quick_write_node(family='prerender')",
     "Ctrl+Shift+W",
 )
+m.addCommand("&Oversized Write Node", "ovs_write_node()")
+
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")
 nuke.addKnobChanged(embedOptions, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
 nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
+nuke.addOnScriptSave(set_hwrite_version)
 nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")

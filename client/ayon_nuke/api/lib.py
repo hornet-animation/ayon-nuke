@@ -1135,7 +1135,10 @@ def create_write_node(
     Return:
         node (obj): group node with avalon data as Knobs
     '''
-        
+    # Emergency status
+    is_ovs = data["is_ovs"]
+
+
     # Ensure name does not contain any invalid characters.
     special_chars = re.escape("!@#$%^&*()=[]{}|\\;',.<>/?~+-")
     special_chars_regex = re.compile(f"[{special_chars}]")
@@ -1191,10 +1194,14 @@ def create_write_node(
         "ext": ext
     })
 
-    # build file path to workfiles
-    data["work"] = get_work_default_directory(data)
-    fpath = StringTemplate(data["fpath_template"]).format_strict(data)
 
+    data["work"] = get_work_default_directory(data)
+    # build file path to workfiles
+    if is_ovs is False:
+        fpath = StringTemplate(data["fpath_template"]).format_strict(data)
+    else:
+        fpath = get_ovs_pathing(data)
+ 
     # Override output directory is provided staging directory.
     if data.get("staging_dir"):
         basename = os.path.basename(fpath)
@@ -1247,6 +1254,9 @@ def create_write_node(
             imageio_writes["knobs"],
             **data
         )
+        # Set create directories on ovs nodes
+        if is_ovs:
+            write_node["create_directories"].setValue(True)
 
         nuke.tprint(type(write_node))
         nuke.tprint(write_node.Class())
@@ -1315,6 +1325,7 @@ def create_write_node(
     # add_button_navigate_to_render(GN, os.path.dirname(fpath))
 
     # set tile color
+
     tile_color = next(
         iter(
             k[k["type"]] for k in imageio_writes["knobs"]
@@ -1326,8 +1337,13 @@ def create_write_node(
         if isinstance(c, float):
             c = int(c * 255)
         new_tile_color.append(c)
-    GN["tile_color"].setValue(
-        color_gui_to_int(new_tile_color))
+    if is_ovs is False:
+        GN["tile_color"].setValue(
+            color_gui_to_int(new_tile_color))
+    else: # Emergency write color
+        GN["tile_color"].setValue(
+            color_gui_to_int([255,102,204,255])
+        )
 
 
 
@@ -3060,3 +3076,157 @@ def open_file_browser(path):
        subprocess.run(["open", path])
    else:  # Linux
        subprocess.run(["xdg-open", path])
+
+
+# TODO Function to handle the creation of the ovs pathing
+def get_ovs_pathing(data):
+    """
+    Function to build a direct to publish destination path for writing.
+    """
+    #Building path
+    host = registered_host()
+    context = host.get_current_context()
+    anatomy = Anatomy()
+    directory_template = anatomy.templates["publish"]["render"]["directory"]
+    root = anatomy.roots["work"].value.rstrip("/")
+    project_name = context["project_name"]
+    hierarchy = pathlib.Path(context["folder_path"].lstrip("/")).parent
+    shot = pathlib.Path(context["folder_path"]).name
+    product = data["productType"]
+    name = data["productName"]
+    version = 0  # temp value so we can parse the template
+
+    publish_path = pathlib.PurePosixPath(
+        directory_template.format_map(
+            {
+                "root": {"work": root},
+                "project": {"name": project_name},
+                "hierarchy": hierarchy,
+                "folder": {"name": shot},
+                "product": {"type": product, "name": name},
+                "version": version,
+            }
+        )
+    ).parent
+
+    if is_version_file_linked():
+        ver = get_version_from_path(nuke.Root().name())
+        render_version = int(ver)
+        render_version_name = "v"+ver
+
+
+    else:    
+        versions = get_pub_version(project_name, name, context["folder_path"])
+        if not versions:
+            return
+        render_version, render_version_name = incriment_pub_version(versions[0],versions[1])
+
+    publish_path /= render_version_name
+
+    # Create filename
+    file_template = anatomy.templates["publish"]["render"]["file"]
+    file_data ={
+            "folder":{"name": shot},
+            "product":{"name": name },
+            "version":render_version,
+            "frame":"%04d",
+            "ext":data["ext"]
+        }
+    
+    file_string = StringTemplate(file_template).format_strict(file_data)
+    publish_path /= file_string
+
+    return str(publish_path)
+
+
+def incriment_pub_version(version_num, version_name):
+    """
+    Incriment the version number and version string
+
+    Args:
+        version_num (int): The current ayon version val
+        version_name (string): The current ayon version name
+    
+    Returns:
+        inc_version_num (int): Version val +1
+        inc_version_name (string): Ayon version name with new version num
+    """
+    inc_version_num = version_num + 1
+    inc_version_name = version_name[:-len(str(inc_version_num))]+ str(inc_version_num)
+
+    return inc_version_num, inc_version_name
+
+
+def get_pub_version(project, product, folder_path):
+    """
+    Query the latest version of a publish via the ayon api
+
+    Args:
+        project (string): The name of the project
+        product (string): The name of the publish product
+
+    Returns: 
+        latest_version (int): Latest version value
+        version_name (string): Name of latest version formatted for pathing
+    """
+    con = ayon_api.get_server_api_connection()
+
+    folder_query = con.get_folder_by_path(
+        project_name=project,
+        folder_path=folder_path
+    )
+
+    product_query = list(con.get_products(
+        project_name=project,
+        product_names=[product],
+        folder_ids=[folder_query["id"]]
+    ))
+
+    if product_query:
+
+        versions = list(con.get_versions(
+            project_name=project,
+            product_ids=[product_query[0]["id"]],
+            latest=True
+        ))[0]
+
+        latest_version = versions["version"]
+        version_name = versions["name"]
+    
+    else:
+        latest_version = 0
+        version_name = "v000"
+
+    ayon_api.close_connection()
+    return latest_version, version_name
+
+
+def is_version_file_linked():
+    """
+    Query if worfile versions are linked to publish versions
+
+    Returns:
+        result (bool): Ayon setting value
+    """
+    con = ayon_api.get_server_api_connection()
+    active_variant = con.get_default_settings_variant()
+
+    bundle_settings = con.get_bundle_settings(active_variant)["addons"]
+
+    for setting in bundle_settings:
+        if setting["name"]=="core":
+            addon_version = setting["version"]
+
+    settings = con.get_addon_project_settings(
+        addon_name="core",
+        addon_version=addon_version,
+        project_name=os.environ["AYON_PROJECT_NAME"],
+    )
+
+    result = settings["publish"]["CollectAnatomyInstanceData"]["follow_workfile_version"]
+    log.debug(f"Version file link status: {result}")
+    ayon_api.close_connection()
+
+    return result
+
+

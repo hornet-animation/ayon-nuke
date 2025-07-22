@@ -6,9 +6,10 @@ import glob
 import nuke
 import json
 import platform
-from pathlib import Path
-from ayon_core.lib import Logger
+import pathlib
+from ayon_core.lib import Logger, StringTemplate
 from file_sequence import FileSequence, Components
+from ayon_nuke.api.lib import get_pub_version
 
 log = Logger.get_logger(__name__)
 
@@ -191,8 +192,8 @@ def write_to_read(write_group_node, allow_relative=False):
 def slice_path(path, start, end):
     # return a re-joined path from a slice of path parts
 
-    path = Path(path)
-    return Path(path.parts[start]).joinpath(*path.parts[start + 1 : end])
+    path = pathlib.Path(path)
+    return pathlib.Path(path.parts[start]).joinpath(*path.parts[start + 1 : end])
 
 
 def get_publish_instance_data(write_node):
@@ -206,31 +207,26 @@ def get_publish_instance_data(write_node):
 def assemble_publish_path(ayon_write_node):
     from ayon_core.pipeline import registered_host, Anatomy
 
+
     host = registered_host()
     context = host.get_current_context()
     instance_data = get_publish_instance_data(ayon_write_node)
     anatomy = Anatomy()
     directory_template = anatomy.templates["publish"]["render"]["directory"]
-    file_termplate = anatomy.templates["publish"]["render"]["file"]
+    file_template = anatomy.templates["publish"]["render"]["file"]
 
     root = anatomy.roots["work"].value.rstrip("/")
     project_name = context["project_name"]
-    hierarchy = Path(context["folder_path"].lstrip("/")).parent
-    shot = Path(context["folder_path"]).name
-    product = get_publish_instance_data(ayon_write_node)["productType"]
-    name = get_publish_instance_data(ayon_write_node)["productName"]
-    version = 0  # temp value so we can parse the template
+    hierarchy = pathlib.Path(context["folder_path"].lstrip("/")).parent
+    shot = pathlib.Path(context["folder_path"]).name
+    product = instance_data["productType"]
+    name = instance_data["productName"]
+    
 
-    # directory_data = {
-    #     "root": {"work": root},
-    #     "project": {"name": project_name},
-    #     "hierarchy": hierarchy,
-    #     "folder": {"name": shot},
-    #     "product": {"type": product, "name": name},
-    #     "version": version,
-    # }
+    # New get version
+    versions = get_pub_version(project_name, name, context["folder_path"])
 
-    publish_path = Path(
+    publish_path = pathlib.PurePosixPath(
         directory_template.format_map(
             {
                 "root": {"work": root},
@@ -238,29 +234,24 @@ def assemble_publish_path(ayon_write_node):
                 "hierarchy": hierarchy,
                 "folder": {"name": shot},
                 "product": {"type": product, "name": name},
-                "version": version,
+                "version": versions[0],
             }
         )
-    ).parent
+    )
 
-    print(f"Publish path: {publish_path}")
-    nuke.tprint(f"Publish path: {publish_path}")
 
-    try:
-        newest_version = Path(
-            sorted([d.name for d in publish_path.iterdir() if d.is_dir()])[-1]
-        )
-    except IndexError:
-        print("No versions, has it been published?")
-        log.error("No versions, has it been published?")
-        return
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        log.error(f"Unexpected error: {e}")
-        return
-
-    publish_path /= newest_version
-    log.info(f"Publish path: {publish_path}")
+    # try:
+    #     newest_version = Path(
+    #         sorted([d.name for d in publish_path.iterdir() if d.is_dir()])[-1]
+    #     )
+    # except IndexError:
+    #     print("No versions, has it been published?")
+    #     log.error("No versions, has it been published?")
+    #     return
+    # except Exception as e:
+    #     print(f"Unexpected error: {e}")
+    #     log.error(f"Unexpected error: {e}")
+    #     return
 
     extension = ayon_write_node["file_type"].value()
 
@@ -270,46 +261,43 @@ def assemble_publish_path(ayon_write_node):
     # last_frame = int(ayon_write_node["Render End"].getValue())
     # pad_count = len(str(last_frame))
 
-    # file_data = {
-    #     "folder": {"name": shot},
-    #     "product": {"type": product, "name": name},
-    #     "version": newest_version,
-    #     "output": "",  # TODO what is this?
-    #     "extension": extension,
-    # }
+    file_data = {
+        "folder": {"name": shot},
+        "product": {"name": name},
+        "frame": "%04d",
+        "version": versions[0],
+        "ext": extension,
+    }
     
-    """
-    Ideally we would query the database for products to get the latest version, 
-    and parse "file_template" to get the file name. 
+    file_string = StringTemplate(file_template).format_strict(file_data)
+
+    # """
+    # Ideally we would query the database for products to get the latest version, 
+    # and parse "file_template" to get the file name. 
     
-    For now I am finding the latest version from the file system, and 
-    using FileSequence lib to extract a valid image sequence from that location
-    """
+    # For now I am finding the latest version from the file system, and 
+    # using FileSequence lib to extract a valid image sequence from that location
+    # """
+    # RESOLVED
 
-    
+    # seqs = FileSequence.match_components_in_path(
+    #     Components(
+    #         extension=extension,
+    #     ),
+    #     publish_path,
+    # )
 
-    seqs = FileSequence.match_components_in_path(
-        Components(
-            extension=extension,
-        ),
-        publish_path,
-    )
+    # if not seqs:
+    #     print("No sequence found")
+    #     return
 
-    if not seqs:
-        print("No sequence found")
-        return
+    # sequence = seqs[0]
+    # string = sequence.sequence_string(sequence.StringVariant.NUKE)
 
-    sequence = seqs[0]
-    string = sequence.sequence_string(sequence.StringVariant.NUKE)
+    result = publish_path / file_string
+    log.debug(f"Assembled publish path:{result}")
 
-    result = publish_path / string
-    
-    print(f"Publish path: {result}")
-    nuke.tprint(f"Publish path: {result}")
-    
-    # return str(result)
-    return result
-
+    return str(result)
 
 
 def read_from_publish(ayon_write_node):
@@ -343,7 +331,6 @@ def get_publish_instance_data(write_node):
     )
 
 
-
 def navigate_to_render(write_node):
     ''' Open explorer at the location of the render file
 
@@ -352,7 +339,7 @@ def navigate_to_render(write_node):
 
     ''' 
 
-    file_path = Path(write_node['File output'].evaluate()).parent
+    file_path = pathlib.Path(write_node['File output'].evaluate()).parent
     if not file_path.exists():
         return
 
@@ -383,8 +370,6 @@ def navigate_to_publish(write_node):
     if not path.exists():
         return
 
-
-
     if platform.system() == "Windows":
         os.startfile(path)
     elif platform.system() == "Darwin":  # macOS
@@ -392,9 +377,6 @@ def navigate_to_publish(write_node):
     else:  # Linux
         subprocess.run(["xdg-open", path])
         
-
-
-
 
 def filter_write_nodes(nodes):
 
