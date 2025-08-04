@@ -210,7 +210,7 @@ def quick_publish(
 
 def batch_publish_write_nodes(
     write_nodes,
-    delay_between_publishes=1.0,
+    delay=1.0,
     review=True,
     review_farm=True,
     integrate_farm=True,
@@ -222,7 +222,7 @@ def batch_publish_write_nodes(
 
     Args:
         write_nodes (list): List of nuke write group nodes to publish
-        delay_between_publishes (float): Seconds to wait between publishes
+        delay: (float): Seconds to wait between publishes
         review (bool): Whether to generate review media at all
         review_farm (bool): Whether to generate review media on farm (True) or locally (False)
         integrate_farm (bool): Whether to use farm integration ("frames_farm") or local ("frames")
@@ -275,9 +275,9 @@ def batch_publish_write_nodes(
         # Add delay between publishes to prevent memory buildup
         if i < len(write_nodes) - 1:  # Don't delay after the last one
             log.info(
-                f"Waiting {delay_between_publishes} seconds before next publish..."
+                f"Waiting {delay} seconds before next publish..."
             )
-            time.sleep(delay_between_publishes)
+            time.sleep(delay)
 
     # Show summary
     summary = "Batch publish completed:\n"

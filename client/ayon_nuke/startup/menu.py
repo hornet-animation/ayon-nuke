@@ -1,6 +1,17 @@
+# from hornet_deadline_utils import save_script_with_render
+# from hornet_publish_utils import quick_publish
+# from ayon_core.pipeline import install_host
+# from ayon_nuke.api import NukeHost
+# from ayon_core.lib import Logger
+# from ayon_nuke.api.lib import WorkfileSettings
+
+# import hornet_publish_review_media
+# import hornet_deadline_utils
+# import file_sequence
+
 
 """
-I've begun moving quick_write functions into their own file,
+I've begun moving functions into their own files,
 but you have to be careful because function calls embedded as
 strings in old nodes will break if they are not available
 directly in this scope, and old nuke scripts will break
@@ -11,40 +22,43 @@ it gradually with depracation warnings
 
 Alex H
 """
+
 import nuke
 import os
-import quick_write
-import read_node_utils
+
+# TODO use namespace on python buttons, not global scope ////  include stubs with deprecation warnings
 from quick_write import (
+    embed_experimental,
+    embedOptions,
+    ovs_write_node,
+    quick_publish_wrapper,
+    quick_write_node,
+    _quick_write_node,
+    ovs_write_node,
+    embed_experimental,
     embedOptions,
     presets,
-    set_hwrite_version,
-    embed_experimental,
     handle_farm_publish_logic,
-    quick_publish_wrapper,
-    show_quick_publish_info,
-    quick_write_node,
-    ovs_write_node,
-    quick_publish_wrapper,
-    quick_write_node,
-    ovs_write_node,
-    quick_publish_wrapper,
+    quick_publish_wrapper
 )
-from hornet_deadline_utils import save_script_with_render
-from hornet_publish_utils import quick_publish
+from hornet_deadline_utils import *  # TODO use namespace on python buttons, not global scope ////  include stubs with deprecation warnings
 from ayon_core.pipeline import install_host
 from ayon_nuke.api import NukeHost
 from ayon_core.lib import Logger
 from ayon_nuke.api.lib import WorkfileSettings
 
-import hornet_publish_review_media
-import hornet_deadline_utils
-import file_sequence
+
+print("env")
+print(os.environ)
 
 host = NukeHost()
 install_host(host)
 
 log = Logger.get_logger(__name__)
+
+log.info("Hornet Ayon Nuke Menu.py")
+print("Hornet Ayon Nuke Menu.py")
+
 
 def apply_format_presets():
     # print("apply_format_presets")
@@ -122,7 +136,6 @@ def writes_ver_sync():
 
 
 def switchExtension():
-
     nde = nuke.thisNode()
     knb = nuke.thisKnob()
     if knb == nde.knob("file_type"):

@@ -140,21 +140,33 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
     )
 
     qnode = nuke.toNode(family + os.environ["AYON_TASK_NAME"] + variant)
+    if qnode is None:
+        raise RuntimeError(
+            f"Failed to find node: {family + os.environ['AYON_TASK_NAME'] + variant}"
+        )
+
     print(f"Created Write Node: {qnode.name()}")
     data["folderPath"] = os.environ["AYON_FOLDER_PATH"]
+
+    print(f"Knobs before set_node_data: {list(qnode.knobs().keys())}")
+
     api.set_node_data(qnode, api.INSTANCE_DATA_KNOB, data)
-    instance_data = json.loads(qnode.knob(api.INSTANCE_DATA_KNOB).value()[7:])
-    instance_data.pop("version", None)
-    instance_data["task"] = os.environ["AYON_TASK_NAME"]
-    instance_data["creator_attributes"] = {
+
+    print(f"Knobs after set_node_data: {list(qnode.knobs().keys())}")
+
+    data.pop("version", None)
+    data["task"] = os.environ["AYON_TASK_NAME"]
+    data["creator_attributes"] = {
         "render_taget": "frames_farm",
         "review": True,
     }
-    instance_data["publish_attributes"] = {
+    # Set publish priority (always 95 for publishes)
+    data["priority"] = 95
+    data["publish_attributes"] = {
         "CollectFramesFixDef": {"frames_to_fix": "", "rewrite_version": False},
         "ValidateCorrectAssetContext": {"active": True},
         "NukeSubmitDeadline": {
-            "priority": 95,
+            "priority": 95,  # Publish jobs always use priority 95
             "chunk": 1,
             "concurrency": 1,
             "use_gpu": True,
@@ -163,9 +175,15 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
             "use_published_workfile": True,
         },
     }
-    qnode.knob(api.INSTANCE_DATA_KNOB).setValue(
-        "JSON:::" + json.dumps(instance_data)
-    )
+
+    # Update the knob with the modified data
+    instance_knob = qnode.knob(api.INSTANCE_DATA_KNOB)
+    if instance_knob is None:
+        raise RuntimeError(
+            f"Failed to create {api.INSTANCE_DATA_KNOB} knob on node {qnode.name()}"
+        )
+
+    instance_knob.setValue("JSON:::" + json.dumps(data))
     if family == "prerender":
         qnode.knob("tile_color").setValue(2880113407)
     with qnode.begin():
@@ -418,14 +436,13 @@ If "Transfer renders using farm" is checked, the transfer will take place remote
 
 
 def embed_experimental():
-
     """
     Creates an experimental tab with additional publish options and quick publish functionality.
     """
     nde = nuke.thisNode()
     knb = nuke.thisKnob()
 
-    # Only run when file_type knob changes, to avoid multiple calls
+
     if knb != nde.knob("file_type"):
         return
 
@@ -437,14 +454,14 @@ def embed_experimental():
     if "experimental" in group.knobs():
         return
 
-    # Create the Experimental tab (simple tab, not a group)
+
     experimental_tab = nuke.Tab_Knob(
         "experimental",
         "Quick Publish - experimental",
         nuke.TABBEGINCLOSEDGROUP,
     )
 
-    # Check if this is a prerender node to skip review options
+
     is_prerender = False
     try:
         data = json.loads(
@@ -455,7 +472,7 @@ def embed_experimental():
     except (KeyError, TypeError, ValueError):
         is_prerender = False
 
-    # Create checkboxes
+
     publish_on_farm_checkbox = nuke.Boolean_Knob(
         "publish_on_farm", "Transfer renders using Farm"
     )
@@ -465,7 +482,7 @@ def embed_experimental():
     )
     publish_on_farm_checkbox.setFlag(nuke.STARTLINE)
 
-    # Only create review related for non prerender nodes
+
     if not is_prerender:
         generate_review_checkbox = nuke.Boolean_Knob(
             "generate_review_media", "Generate Review Media"
@@ -485,7 +502,7 @@ def embed_experimental():
         )
         generate_review_farm_checkbox.setFlag(nuke.STARTLINE)
 
-        # If publish_on_farm is True, automatically set this to True and disable it
+
         if publish_on_farm_checkbox.value():
             generate_review_farm_checkbox.setValue(True)
             generate_review_farm_checkbox.setEnabled(False)
@@ -506,7 +523,7 @@ def embed_experimental():
     )
     quick_publish_button.setTooltip("Submit publish")
 
-    # Add the new text window button
+
     show_info_button = nuke.PyScript_Knob(
         "show_info",
         "Show Info",
@@ -514,7 +531,7 @@ def embed_experimental():
     )
     show_info_button.setTooltip("Display information window")
 
-    # group.addKnob(div)
+
     spacer = nuke.Text_Knob("exp_spacer", "", "")
     group.addKnob(spacer)
     group.addKnob(experimental_tab)

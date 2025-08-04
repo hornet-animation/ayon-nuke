@@ -238,6 +238,15 @@ def build_request(knobValues, temp_script_path, node):
         "OFX_PLUGIN_PATH",
         "RVL_SERVER",
         "neatlab_LICENSE",
+        # AYON environment variables - critical for farm nodes
+        "AYON_WORKDIR",
+        "AYON_PROJECT_NAME",
+        "AYON_FOLDER_PATH",
+        "AYON_TASK_NAME",
+        "AYON_PROJECT_ROOT_WORK",
+        "AYON_BUNDLE_NAME",
+        "AYON_DEFAULT_SETTINGS_VARIANT",
+        "PYTHONPATH",  # Include PYTHONPATH so farm gets AYON module paths
     ]
     environment = dict(
         {k: os.environ[k] for k in submissionEnvVars if k in os.environ.keys()}

@@ -184,7 +184,6 @@ def generate_review_media_local(data, logger=None):
     if template_script is None:
         log.raise_exception("template_script is None")
 
-
     # Get list of nodes from template script
     for node in nuke.allNodes():
         node.setSelected(False)
@@ -193,9 +192,8 @@ def generate_review_media_local(data, logger=None):
     new_nodes = set()
     nuke.nodePaste(template_script)
     new_nodes = set(nuke.allNodes()) - current_nodes
-    
-    
-    # minimise clutter in user's node graph in case the script fails and they have to delete them 
+
+    # minimise clutter in user's node graph in case the script fails and they have to delete them
     backdrops = []
     for node in new_nodes:
         if node.Class() == "BackdropNode":
@@ -215,8 +213,7 @@ def generate_review_media_local(data, logger=None):
     # this is the same script that is called from the onScriptLoad callback on the farm
     hornet_publish_configurate(data, new_nodes)
 
-
-    # render the review media - on farm handled by the deadline plugin 
+    # render the review media - on farm handled by the deadline plugin
     for node_name in write_nodes:
         n = nuke.toNode(node_name)
         if nuke.toNode(node_name) is None:
@@ -446,6 +443,15 @@ def build_request(submission_info, temp_script_path, publish_env_vars):
         "OFX_PLUGIN_PATH",
         "RVL_SERVER",
         "neatlab_LICENSE",
+        # AYON environment variables - critical for farm nodes
+        "AYON_WORKDIR",
+        "AYON_PROJECT_NAME",
+        "AYON_FOLDER_PATH",
+        "AYON_TASK_NAME",
+        "AYON_PROJECT_ROOT_WORK",
+        "AYON_BUNDLE_NAME",
+        "AYON_DEFAULT_SETTINGS_VARIANT",
+        "PYTHONPATH",  # Include PYTHONPATH so farm gets AYON module paths
     ]
     environment = dict(
         {k: os.environ[k] for k in submissionEnvVars if k in os.environ.keys()}
@@ -629,12 +635,10 @@ class MiniLogger:
         raise exception_type(message)
 
     def dump_log_to_file(self, log_file_path):
-        
         if not self.file_mode:
             return
 
         try:
-            
             with open(log_file_path, "w") as f:
                 f.write("\n".join(self.log_buffer))
 
@@ -711,4 +715,3 @@ def resolve_submission_script(data, write_node_name, logger=None):
         log.raise_exception(f"failed to create publish temp script path: {e}")
 
     return submission_script
-
