@@ -437,7 +437,7 @@ DEFAULT_PUBLISH_PLUGIN_SETTINGS = {
         #"template_script": r"P:/dev/alexh_dev/hornet_publish/hornet_publish_template.nk",
     },
     "IncrementScriptVersion": {
-        "enabled": True,
+        "enabled": False,
         "optional": True,
         "active": True,
     },
