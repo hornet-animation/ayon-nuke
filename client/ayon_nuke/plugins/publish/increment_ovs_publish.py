@@ -4,7 +4,7 @@ import os
 
 from ayon_core.pipeline import OptionalPyblishPluginMixin
 from ayon_core.lib import version_up
-import version
+
 
 
 class IncrementOvsPublish(pyblish.api.ContextPlugin,
