@@ -20,6 +20,8 @@ INSTANCE_ATTRIBUTES_DESCRIPTION: str = """Allows to enable or disable certain fe
     - Render On Farm: Adds a button on the Nuke node that will submit the
         render of the write node to the farm **without** triggering the
         regular publish logic. This is useful for quick test renders.
+    - Debug local review generation: Enables debugging for local review
+        generation, allowing for easier troubleshooting.
     """
 
 PRENODES_LIST_DESCRIPTION: str = (
@@ -45,6 +47,7 @@ def instance_attributes_enum():
             "label": "Generate review media on farm",
         },
         {"value": "review_burnin", "label": "Review burnin"},
+        {"value": "debug_review", "label": "Debug local review generation"},
     ]
 
 
@@ -219,6 +222,7 @@ DEFAULT_CREATE_SETTINGS = {
             "farm_rendering",
             "hornet_review_on_farm",
             "review_burnin",
+            "debug_review",
         ],
         "render_target": "local",
         "exposed_knobs": [],

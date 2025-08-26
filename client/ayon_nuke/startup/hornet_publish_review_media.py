@@ -161,7 +161,7 @@ def hornet_review_media_submit(data, logger=None):
     return failed_submissions == 0
 
 
-def generate_review_media_local(data, logger=None):
+def generate_review_media_local(data, logger=None, debug=False):
     """
     Generate review media locally.
     Pastes nodes into the user's active session, renders, and deletes them.
@@ -298,9 +298,11 @@ def generate_review_media_local(data, logger=None):
                 log.error(f"failed to execute {node_name}: {e}")
                 print(f"failed to execute {node_name}: {e}")
                 pass
-
-    for node_name in new_nodes:
-        nuke.delete(node_name)
+    # Debug node leaves injected review media nodes in the script on completion for debugging
+    if debug is False:
+        # Clean up review media nodes
+        for node_name in new_nodes:
+            nuke.delete(node_name)
 
     return True
 
