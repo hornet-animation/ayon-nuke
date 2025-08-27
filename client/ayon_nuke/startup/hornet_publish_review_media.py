@@ -99,6 +99,8 @@ def hornet_review_media_submit(data, logger=None):
     data is dumped into an env var because hornet_publish_configurate is called
     by the onScriptLoad callback, which means we cannot pass any arguments to it.
     """
+    set_template_env(data)
+
     write_node_info = discover_write_nodes_in_script(data["template_script"])
 
     log.debug(f"write_nodes: {write_node_info}")
@@ -119,7 +121,7 @@ def hornet_review_media_submit(data, logger=None):
             write_node_name=node_name,
             logger=logger,
         )
-
+        log.debug(f"ff:{first} lf:{last}")
         submission_info = {
             "task_name": f"{data['shot']}_{data['name']}_{node_name}_review",
             "deadlinePriority": 95,
@@ -194,46 +196,9 @@ def generate_review_media_local(data, logger=None):
     nuke.nodePaste(template_script)
     new_nodes = set(nuke.allNodes()) - current_nodes
     
-    # TODO set env for local generation
+
     # Same code as found in the JobLoad script for deadline nuke
-    pub_data = data
-    new_env = {}
-
-    first_frame_key = "REVIEW_FF"
-    first_frame_value = str(pub_data["first_frame"])
-    new_env[first_frame_key] = first_frame_value
-
-    last_frame_key = "REVIEW_LF"
-    last_frame_val = str(pub_data["last_frame"])
-    new_env[last_frame_key] = last_frame_val
-
-    shot_name_key = "REVIEW_SHOT_NAME"
-    shot_name_val = pub_data["shot"]
-    new_env[shot_name_key] = shot_name_val
-
-    render_name_key = "REVIEW_RENDER_NAME"
-    render_name_val = pub_data["name"]
-    new_env[render_name_key] = render_name_val
-
-    burnin_key = "REVIEW_BURNIN"
-    burnin_val = str(pub_data["burnin"])
-    new_env[burnin_key] = burnin_val
-
-    version_key = "REVIEW_VERSION"
-    version_val = str(pub_data["version"])
-    new_env[version_key] = version_val
-
-    project_name_key = "REVIEW_PROJECT_NAME"
-    project_name_val = pub_data["project"]
-    new_env[project_name_key] = project_name_val
-
-    pub_seq_key = "REVIEW_PUB_SEQ"
-    pub_seq_val = pub_data["publishedSequence"]
-    new_env[pub_seq_key] = pub_seq_val
-
-    # Inject environment variables for the nuke script
-    for k,v in new_env.items():
-        os.environ[k] = v
+    set_template_env(data)
 
     # minimise clutter in user's node graph in case the script fails and they have to delete them
     backdrops = []
@@ -761,3 +726,48 @@ def resolve_submission_script(data, write_node_name, logger=None):
 
     return submission_script
 
+
+def set_template_env(data):
+    """
+    Set environment variables for the Nuke script based on the provided data.
+    Args:
+        data (dict): Data dictionary containing publish info
+    """
+    pub_data = data
+    new_env = {}
+
+    first_frame_key = "REVIEW_FF"
+    first_frame_value = str(pub_data["first_frame"])
+    new_env[first_frame_key] = first_frame_value
+
+    last_frame_key = "REVIEW_LF"
+    last_frame_val = str(pub_data["last_frame"])
+    new_env[last_frame_key] = last_frame_val
+
+    shot_name_key = "REVIEW_SHOT_NAME"
+    shot_name_val = pub_data["shot"]
+    new_env[shot_name_key] = shot_name_val
+
+    render_name_key = "REVIEW_RENDER_NAME"
+    render_name_val = pub_data["name"]
+    new_env[render_name_key] = render_name_val
+
+    burnin_key = "REVIEW_BURNIN"
+    burnin_val = str(pub_data["burnin"])
+    new_env[burnin_key] = burnin_val
+
+    version_key = "REVIEW_VERSION"
+    version_val = str(pub_data["version"])
+    new_env[version_key] = version_val
+
+    project_name_key = "REVIEW_PROJECT_NAME"
+    project_name_val = pub_data["project"]
+    new_env[project_name_key] = project_name_val
+
+    pub_seq_key = "REVIEW_PUB_SEQ"
+    pub_seq_val = pub_data["publishedSequence"]
+    new_env[pub_seq_key] = pub_seq_val
+
+    # Inject environment variables for the nuke script
+    for k,v in new_env.items():
+        os.environ[k] = v
