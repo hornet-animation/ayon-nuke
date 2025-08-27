@@ -226,8 +226,8 @@ def generate_review_media_local(data, logger=None, debug=False):
     for node_name in write_nodes:
         n = nuke.toNode(node_name)
 
-        output_path = Path(pub_data["publishDir"]) / "review"
-        output_name = pub_data["shot"]+"_"+pub_data["name"]+"_"+node_name
+        output_path = Path(data["publishDir"]) / "review"
+        output_name = data["shot"]+"_"+data["name"]+"_"+node_name
         output_path_key = "REVIEW_"+node_name
         output_path_val = output_path / output_name
         os.environ[output_path_key] = output_path_val.as_posix()
