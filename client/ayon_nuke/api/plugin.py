@@ -447,6 +447,17 @@ class NukeWriteCreator(NukeCreator):
                 )
             )
 
+        # TODO there is probably a better way to get this into the instance attributes but haven't been able to get it to work
+        self.instance_attributes.append("debug_review") if "debug_review" not in self.instance_attributes else None
+        if "debug_review" in self.instance_attributes:
+            attr_defs.append(
+                BoolDef(
+                    "debug_review",
+                    default=False,
+                    label="Debug local review generation",
+                )
+            )
+
         return attr_defs
 
     def _get_render_target_enum(self):

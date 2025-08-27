@@ -354,8 +354,10 @@ class IntegrateProresReview(
                     )
                     return
             else:
+                debug_status = instance.data["creator_attributes"].get("debug_review", False)
+                self.log.info(f"Debug local review generation: {debug_status}")
                 hornet_publish_review_media.generate_review_media_local(
-                    data, logger=self.log
+                    data, logger=self.log, debug=debug_status
                 )
 
             self.log.info(
