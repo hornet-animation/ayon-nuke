@@ -43,7 +43,7 @@ from ayon_nuke.api.lib import WorkfileSettings
 import hornet_publish_review_media
 import hornet_deadline_utils
 import file_sequence
-import kroger_write
+import views_write
 
 host = NukeHost()
 install_host(host)
@@ -88,6 +88,9 @@ def writes_ver_sync():
             # check if the node is avalon tracked
             if each.name().startswith("inside_"):
                 avalonNode = nuke.toNode(each.name().replace("inside_", ""))
+                if avalonNode is None:
+                    print(f"Avalon node not found for {each.name()}")
+                    continue
             else:
                 avalonNode = each
             if "AvalonTab" not in avalonNode.knobs():
@@ -203,9 +206,9 @@ m.addCommand(
 )
 m.addCommand("&Oversized Write Node", "ovs_write_node()")
 m.addCommand(
-        "Kroger Write Node",
-        "kroger_write.kroger_write_node(_quick_write_node)",
-        tooltip="Create a kroger write node that generates write nodes for all views",
+        "Views Write Node",
+        "views_write.views_write_node(_quick_write_node)",
+        tooltip="Create a views write node that generates write nodes for all views",
 )
 
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")

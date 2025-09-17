@@ -291,10 +291,19 @@ def embedOptions():
     group.addKnob(publishLast)
     group.addKnob(usePublishRange)
 
+    renderInterval = nuke.Int_Knob("renderInterval", "Render every")
+    renderInterval.setValue(1)
+    renderInterval.setTooltip("Render every N frames (1 = every frame, 2 = every other frame, etc.)")
+    group.addKnob(renderInterval)
+
+    renderIntervalLabel = nuke.Text_Knob("renderIntervalLabel", "", "frame(s)")
+    renderIntervalLabel.clearFlag(nuke.STARTLINE)
+    group.addKnob(renderIntervalLabel)
+
     submit_to_deadline = nuke.PyScript_Knob(
-        "submit", 
-        "Submit to Deadline", 
-        "update_ovs_write_version(nuke.thisNode());deadlineNetworkSubmit()"
+        "submit",
+        "Submit to Deadline",
+        "try:\n    update_ovs_write_version(nuke.thisNode())\n    if nuke.thisNode().knob('_cancelled') and nuke.thisNode()['_cancelled'].value():\n        print('Submit cancelled by user')\n    else:\n        deadlineNetworkSubmit()\nexcept Exception as e:\n    print(f'Error in submit: {e}')"
     )
 
     clear_temp_outputs_button = nuke.PyScript_Knob(
@@ -316,7 +325,7 @@ def embedOptions():
     render_local_button = nuke.PyScript_Knob(
         "renderlocal",
         "Render Local",
-        "import ayon_nuke.api.lib as lib;update_ovs_write_version(nuke.thisNode());nuke.toNode(f'inside_{nuke.thisNode().name()}').knob('Render').execute();save_script_with_render(nuke.thisNode()['File output'].getValue(),lib.get_node_data(nuke.thisNode(),'publish_instance')['is_ovs'])",
+        "import ayon_nuke.api.lib as lib\ntry:\n    update_ovs_write_version(nuke.thisNode())\n    if nuke.thisNode().knob('_cancelled') and nuke.thisNode()['_cancelled'].value():\n        print('Render cancelled by user')\n    else:\n        nuke.toNode(f'inside_{nuke.thisNode().name()}').knob('Render').execute()\n        save_script_with_render(nuke.thisNode()['File output'].getValue(),lib.get_node_data(nuke.thisNode(),'publish_instance')['is_ovs'])\nexcept Exception as e:\n    print(f'Error in render: {e}')",
     )
 
     div = nuke.Text_Knob("div", "", "")
@@ -567,15 +576,97 @@ def handle_farm_publish_logic():
         nde.knob("generate_review_media_on_farm").setEnabled(True)
 
 
-def update_ovs_write_version(node):
-    """
-    Set the version of ovs quickwrite filepaths based on latest target version.
-    This runs on Render Local and Submit to Deadline buttons.
+def check_existing_files_pattern(node):
+    """Check if files matching the write node's output pattern already exist."""
+    import glob
+    import re
 
-    Args:
-        node (nuke.Node): The OVS write node to update.
-        This node should have the INSTANCE_DATA_KNOB containing the necessary data.
-    """
+    try:
+        if "File output" in node.knobs():
+            file_path = node["File output"].value()
+        else:
+            node_name = node["name"].value()
+            interior_write = "inside_" + node_name
+            wnode = nuke.toNode(interior_write)
+            if wnode is not None and "file" in wnode.knobs():
+                file_path = wnode["file"].value()
+            else:
+                return True
+
+        if not file_path:
+            return True
+
+        glob_pattern = re.sub(r'#+', '*', file_path)
+        glob_pattern = re.sub(r'%\d+d', '*', glob_pattern)
+
+        existing_files = glob.glob(glob_pattern)
+
+        if existing_files:
+            file_list = existing_files[:10]
+            if len(existing_files) > 10:
+                file_list.append(f"... and {len(existing_files) - 10} more files")
+
+            files_display = "\n".join([os.path.basename(f) for f in file_list])
+            message = f"WARNING: Files matching the output pattern already exist:\n\n{files_display}\n\nThis render may overwrite existing files.\n\nContinue anyway?"
+
+            return nuke.ask(message)
+
+        return True
+
+    except Exception as e:
+        log.error(f"Error checking existing files: {e}")
+        return True
+
+
+def get_frame_range_with_interval(node):
+    """Generate frame range string with interval in format start-endxinterval"""
+    try:
+        # Get frame range from inside write node
+        inside_name = f"inside_{node.name()}"
+        inside_write = nuke.toNode(inside_name)
+
+        if inside_write:
+            start = int(inside_write["first"].value())
+            end = int(inside_write["last"].value())
+        else:
+            start = int(nuke.root().firstFrame())
+            end = int(nuke.root().lastFrame())
+
+        # Get interval from group node
+        interval = 1
+        if node.knob("renderInterval"):
+            interval = max(1, int(node["renderInterval"].value()))
+
+        if interval == 1:
+            return f"{start}-{end}"
+        else:
+            return f"{start}-{end}x{interval}"
+    except Exception as e:
+        log.error(f"Error getting frame range: {e}")
+        return f"{int(nuke.root().firstFrame())}-{int(nuke.root().lastFrame())}"
+
+
+def update_ovs_write_version(node):
+    """Set the version of ovs quickwrite filepaths based on latest target version."""
+
+    # Clear any previous cancellation flag
+    if node.knob("_cancelled"):
+        node["_cancelled"].setValue(False)
+
+    if INSTANCE_DATA_KNOB in node.knobs():
+        data = json.loads(
+            node.knobs()[INSTANCE_DATA_KNOB].value().replace("JSON:::", "", 1)
+        )
+        if data.get("is_ovs", False):
+            if not check_existing_files_pattern(node):
+                log.info("Render/submission cancelled due to existing files.")
+                # Set cancellation flag
+                if not node.knob("_cancelled"):
+                    cancel_knob = nuke.Boolean_Knob("_cancelled", "")
+                    cancel_knob.setVisible(False)
+                    node.addKnob(cancel_knob)
+                node["_cancelled"].setValue(True)
+                return
 
     if INSTANCE_DATA_KNOB in node.knobs():
         data = json.loads(

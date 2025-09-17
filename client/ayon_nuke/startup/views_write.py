@@ -458,12 +458,12 @@ class Render_submission_dialog(QtWidgets.QDialog):
 
             if not self.kroger_node:
                 QtWidgets.QMessageBox.warning(
-                    self, "Test Apply", "No kroger write node reference!"
+                    self, "Test Apply", "No views write node reference!"
                 )
                 return
 
         try:
-            # Find the generated nodes inside the kroger write group
+            # Find the generated nodes inside the views write group
             with self.kroger_node:
                 all_nodes = nuke.allNodes()
                 generated_nodes = [
@@ -681,13 +681,13 @@ class Batch_publish_dialog(QtWidgets.QDialog):
         layout.addWidget(button_box)
 
     def populate_view_table(self):
-        """Populate the table with available views from kroger write nodes"""
+        """Populate the table with available views from views write nodes"""
         if not self.kroger_node:
             return
 
         views = []
         try:
-            # Get views from the generated nodes inside the kroger write group
+            # Get views from the generated nodes inside the views write group
             with self.kroger_node:
                 all_nodes = nuke.allNodes()
                 generated_nodes = [
@@ -794,9 +794,9 @@ class Batch_publish_dialog(QtWidgets.QDialog):
 def load_saved_data_from_node(kroger_node=None):
     """Load saved data from the node's hidden knob"""
     try:
-        krogerWrite = kroger_node if kroger_node else nuke.thisNode()
-        if krogerWrite.knob("dialog_data"):
-            data_str = krogerWrite["dialog_data"].getValue()
+        viewsWrite = kroger_node if kroger_node else nuke.thisNode()
+        if viewsWrite.knob("dialog_data"):
+            data_str = viewsWrite["dialog_data"].getValue()
             if data_str:
                 # Safely evaluate the string as a Python dictionary
                 return ast.literal_eval(data_str)
@@ -808,9 +808,9 @@ def load_saved_data_from_node(kroger_node=None):
 def save_data_to_node(data, kroger_node=None):
     """Save data to the node's hidden knob"""
     try:
-        krogerWrite = kroger_node if kroger_node else nuke.thisNode()
-        if krogerWrite.knob("dialog_data"):
-            krogerWrite["dialog_data"].setValue(str(data))
+        viewsWrite = kroger_node if kroger_node else nuke.thisNode()
+        if viewsWrite.knob("dialog_data"):
+            viewsWrite["dialog_data"].setValue(str(data))
     except Exception as e:
         print(f"Error saving data: {e}")
 
@@ -862,7 +862,7 @@ def batch_publish_button_callback():
         print("Batch publish dialog cancelled")
 
 
-def submit_renders(data, krogerWrite):
+def submit_renders(data, viewsWrite):
     print("submitting renders with data:")
     """Submit the selected renders to the farm"""
     import os
@@ -874,7 +874,7 @@ def submit_renders(data, krogerWrite):
         nuke.message("Error: hornet_deadline_utils module not found!")
         return
 
-    print("krogerWrite node found:", krogerWrite.name())
+    print("viewsWrite node found:", viewsWrite.name())
     selected_views = data["selected_views"]
     view_data = data["view_data"]
 
@@ -889,7 +889,7 @@ def submit_renders(data, krogerWrite):
     batch_name = f"{script}_{now}"
 
 
-    with krogerWrite:
+    with viewsWrite:
         all_nodes = nuke.allNodes()
         generated_nodes = [
             node
@@ -898,7 +898,7 @@ def submit_renders(data, krogerWrite):
         ]
 
         if generated_nodes.count == 0:
-            nuke.message("No generated nodes found in kroger write group!")
+            nuke.message("No generated nodes found in views write group!")
             return
 
         
@@ -957,11 +957,11 @@ def submit_renders(data, krogerWrite):
 def update_write_nodes_list(kroger_node=None):
     """Update the list of write nodes and their views in the properties panel"""
     try:    
-        krogerWrite = kroger_node if kroger_node else nuke.thisNode()
+        viewsWrite = kroger_node if kroger_node else nuke.thisNode()
         views_list = []
 
         
-        with krogerWrite:
+        with viewsWrite:
             all_nodes = nuke.allNodes()
         
             generated_nodes = [node for node in all_nodes if node.Class() != "Input"]
@@ -974,7 +974,7 @@ def update_write_nodes_list(kroger_node=None):
                     views_list.append(view_name)
 
         
-        write_nodes_list_knob = krogerWrite.knob("write_nodes_list")
+        write_nodes_list_knob = viewsWrite.knob("write_nodes_list")
         if write_nodes_list_knob:
             if views_list:
         
@@ -992,10 +992,10 @@ def update_write_nodes_list(kroger_node=None):
 def regenerate_write_nodes():
     """Delete all existing generated nodes and recreate them based on current views"""
     try:
-        krogerWrite = nuke.thisNode()
+        viewsWrite = nuke.thisNode()
         print("regenerating write nodes...")
 
-        with krogerWrite:
+        with viewsWrite:
         
             all_nodes = nuke.allNodes()
             generated_nodes = [node for node in all_nodes if node.Class() != "Input"]
@@ -1010,19 +1010,19 @@ def regenerate_write_nodes():
         sub_write_node_generator = quick_write._quick_write_node
 
         
-        create_write_nodes_for_views(krogerWrite, sub_write_node_generator)
+        create_write_nodes_for_views(viewsWrite, sub_write_node_generator)
 
         
-        update_write_nodes_list(krogerWrite)
+        update_write_nodes_list(viewsWrite)
         print("nodes regenerated successfully")
 
     except Exception as e:
         print(f"error regenerating nodes: {e}")
 
 
-def create_write_nodes_for_views(krogerWrite, sub_write_node_generator):
+def create_write_nodes_for_views(viewsWrite, sub_write_node_generator):
     """Create generated nodes for all current views"""
-    with krogerWrite:
+    with viewsWrite:
 
         input_nodes = [node for node in nuke.allNodes() if node.Class() == "Input"]
         if not input_nodes:
@@ -1040,8 +1040,8 @@ def create_write_nodes_for_views(krogerWrite, sub_write_node_generator):
 
 
         aspect_value = ""
-        if krogerWrite.knob("aspect"):
-            aspect_value = krogerWrite["aspect"].getValue().strip()
+        if viewsWrite.knob("aspect"):
+            aspect_value = viewsWrite["aspect"].getValue().strip()
 
             if aspect_value and not aspect_value.isspace():
                 aspect_value = aspect_value.replace(" ", "_")
@@ -1088,73 +1088,73 @@ def create_write_nodes_for_views(krogerWrite, sub_write_node_generator):
             generated_node.hideControlPanel()
 
 
-def kroger_write_node(sub_write_node_generator=None):
+def views_write_node(sub_write_node_generator=None):
     if sub_write_node_generator is None:
         import quick_write
 
         sub_write_node_generator = quick_write._quick_write_node
 
-    krogerWrite = nuke.createNode("Group")
+    viewsWrite = nuke.createNode("Group")
 
     # Use Nuke's built-in unique naming - this automatically appends numbers if name exists
-    krogerWrite.setName("kroger_write")
+    viewsWrite.setName("views_write")
 
     # Add aspect ratio text input at the top
     aspect_knob = nuke.String_Knob("aspect", "Aspect")
     aspect_knob.setValue("16x9")  # Default aspect ratio
-    krogerWrite.addKnob(aspect_knob)
+    viewsWrite.addKnob(aspect_knob)
 
 
     divider1 = nuke.Text_Knob("divider1", "")
-    krogerWrite.addKnob(divider1)
+    viewsWrite.addKnob(divider1)
 
 
     regenerate_knob = nuke.PyScript_Knob("regenerate_writes", "refresh nodes")
-    regenerate_knob.setValue("kroger_write.regenerate_write_nodes()")
-    krogerWrite.addKnob(regenerate_knob)
+    regenerate_knob.setValue("views_write.regenerate_write_nodes()")
+    viewsWrite.addKnob(regenerate_knob)
 
 
     write_nodes_knob = nuke.Multiline_Eval_String_Knob("write_nodes_list", "Views")
     write_nodes_knob.setFlag(nuke.READ_ONLY)
-    krogerWrite.addKnob(write_nodes_knob)
+    viewsWrite.addKnob(write_nodes_knob)
 
 
     divider_submit = nuke.Text_Knob("divider_submit", "")
-    krogerWrite.addKnob(divider_submit)
+    viewsWrite.addKnob(divider_submit)
 
 
     button_knob = nuke.PyScript_Knob("render_dialog_button", "Configure and Submit")
-    button_knob.setValue("kroger_write.submit_button_callback()")
-    krogerWrite.addKnob(button_knob)
+    button_knob.setValue("views_write.submit_button_callback()")
+    viewsWrite.addKnob(button_knob)
 
 
     batch_publish_knob = nuke.PyScript_Knob("batch_publish_button", "Batch Publish")
-    batch_publish_knob.setValue("kroger_write.batch_publish_button_callback()")
-    krogerWrite.addKnob(batch_publish_knob)
+    batch_publish_knob.setValue("views_write.batch_publish_button_callback()")
+    viewsWrite.addKnob(batch_publish_knob)
 
 
     divider2 = nuke.Text_Knob("divider2", "")
-    krogerWrite.addKnob(divider2)
+    viewsWrite.addKnob(divider2)
 
 
     data_knob = nuke.String_Knob("dialog_data", "Dialog Data")
     data_knob.setVisible(False)
-    krogerWrite.addKnob(data_knob)
+    viewsWrite.addKnob(data_knob)
 
 
-    with krogerWrite:
+    with viewsWrite:
         source_node = nuke.createNode("Input", inpanel=False)
 
     # Create write nodes for current views
-    create_write_nodes_for_views(krogerWrite, sub_write_node_generator)
+    create_write_nodes_for_views(viewsWrite, sub_write_node_generator)
 
     # Auto-populate the write nodes list on creation
-    update_write_nodes_list(krogerWrite)
+    update_write_nodes_list(viewsWrite)
 
 
-    krogerWrite.showControlPanel()
+    viewsWrite.showControlPanel()
 
-    return krogerWrite
+    return viewsWrite
 
 
 """
@@ -1190,16 +1190,16 @@ def batch_publish(
 
     try:
         # Get the current node
-        krogerWrite = kroger_node if kroger_node else nuke.thisNode()
-        print(f"Using kroger node: {krogerWrite.name()}")
+        viewsWrite = kroger_node if kroger_node else nuke.thisNode()
+        print(f"Using kroger node: {viewsWrite.name()}")
 
         publis_nodes = []
-        print(f"Looking for publish nodes in {krogerWrite.name()}...")
+        print(f"Looking for publish nodes in {viewsWrite.name()}...")
         print(f"Selected views filter: {selected_views}")
 
-        with krogerWrite.begin():
+        with viewsWrite.begin():
             nodes = nuke.allNodes("Group")
-            print(f"Found {len(nodes)} Group nodes inside kroger write")
+            print(f"Found {len(nodes)} Group nodes inside views write")
 
             for node in nodes:
                 node_name = node.name()

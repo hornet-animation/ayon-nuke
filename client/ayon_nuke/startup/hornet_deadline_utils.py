@@ -113,6 +113,22 @@ def getSubmitterInfo():
         print("Failed to get submitter info: {}".format(e))
 
 
+def get_frame_range_for_deadline(knobValues):
+    """Generate frame range string with interval for Deadline submission"""
+    try:
+        start = int(knobValues.get("first", nuke.root().firstFrame()))
+        end = int(knobValues.get("last", nuke.root().lastFrame()))
+        interval = int(knobValues.get("renderInterval", 1))
+
+        if interval <= 1:
+            return f"{start}-{end}"
+        else:
+            return f"{start}-{end}x{interval}"
+    except Exception as e:
+        print(f"Error generating frame range: {e}")
+        return f"{int(nuke.root().firstFrame())}-{int(nuke.root().lastFrame())}"
+
+
 def getNodeSubmissionInfo(node):
     print("getNodeSubmissionInfo")
     # node = nuke.thisNode()
@@ -139,6 +155,7 @@ def getNodeSubmissionInfo(node):
         "deadlinePriority",
         "deadlineChunkSize",
         "concurrentTasks",
+        "renderInterval",
     ]
 
     # relevant_inside_knobs = ["first", "last"]
@@ -259,10 +276,7 @@ def build_request(knobValues, temp_script_path, node):
             "SecondaryPool": "",
             "Group": knobValues.get("deadlineGroup") or "nuke",
             "Plugin": "Nuke",
-            "Frames": "{start}-{end}".format(
-                start=int(knobValues["first"]) or nuke.root().firstFrame(),
-                end=int(knobValues["last"]) or nuke.root().lastFrame(),
-            ),
+            "Frames": get_frame_range_for_deadline(knobValues),
             # Optional, enable double-click to preview rendered
             # frames from Deadline Monitor
             # "OutputFilename0": str(output_filename_0).replace("\\", "/"),
