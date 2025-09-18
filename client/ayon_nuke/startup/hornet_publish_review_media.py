@@ -125,7 +125,7 @@ def hornet_review_media_submit(data, logger=None):
         submission_info = {
             "task_name": f"{data['shot']}_{data['name']}_{node_name}_review",
             "deadlinePriority": 95,
-            "deadlinePool": "local",
+            "deadlinePool": data.get("deadline_pool", "local"),
             "deadlineGroup": "nuke",
             "deadlineChunkSize": last
             - first

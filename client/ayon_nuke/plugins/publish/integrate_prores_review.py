@@ -44,6 +44,12 @@ class IntegrateProresReview(
     optional = True  # This makes the plugin optional in the UI
 
     def process(self, instance):
+        
+        
+        self.log.info(instance.data)
+        # return
+
+
         # Skip review generation for prerenders
         product_type = instance.data.get("productType")
         if product_type == "prerender":
@@ -53,6 +59,7 @@ class IntegrateProresReview(
         project_settings = instance.context.data["project_settings"]
         nuke_settings = project_settings.get("nuke", {})
         publish_settings = nuke_settings.get("publish", {})
+        
 
         # get template script from web ui ----------------------------
         try:
@@ -149,7 +156,10 @@ class IntegrateProresReview(
         colorspace = instance.data.get("colorspace", None)
         framestart = instance.data["frameStart"]
         frameend = instance.data["frameEnd"]
-
+        try: 
+            deadline_pool = instance.data["publish_attributes"]["CollectDeadlinePools"]["primaryPool"]
+        except:
+            deadline_pool = "local"
         shot = (
             anatomy_data := instance.data.get("anatomyData")
         ) and anatomy_data.get("asset")
@@ -324,6 +334,7 @@ class IntegrateProresReview(
             "render_target": render_target,
             "jobBatchName": job_batch_name,
             "currentFile": current_file,
+            "deadline_pool": deadline_pool,
         }
 
         self.log.debug(f"data: {data}")
