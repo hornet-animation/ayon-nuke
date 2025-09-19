@@ -44,6 +44,12 @@ class IntegrateProresReview(
     optional = True  # This makes the plugin optional in the UI
 
     def process(self, instance):
+        
+        
+        self.log.info(instance.data)
+        # return
+
+
         # Skip review generation for prerenders
         product_type = instance.data.get("productType")
         if product_type == "prerender":
@@ -53,6 +59,7 @@ class IntegrateProresReview(
         project_settings = instance.context.data["project_settings"]
         nuke_settings = project_settings.get("nuke", {})
         publish_settings = nuke_settings.get("publish", {})
+        
 
         # get template script from web ui ----------------------------
         try:
@@ -139,6 +146,27 @@ class IntegrateProresReview(
                 "review_burnin not found in creator attributes, defaulting to True"
             )
 
+
+        try:
+            deadline_pool = instance.data["deadline_pool"]
+            self.log.info(f"Using deadline pool: {deadline_pool}")
+        except KeyError:
+            deadline_pool = "local"
+            self.log.warning(
+                "deadline_pool not found in creator attributes, defaulting to local"
+            )
+
+        try:
+            deadline_group = instance.data["deadline_group"]
+            self.log.info(f"Using deadline group: {deadline_group}")
+        except KeyError:
+            deadline_group = "nuke"
+            self.log.warning(
+                "deadline_group not found in creator attributes, defaulting to nuke"
+            )
+        
+        
+
         fps = nuke.toNode("root")["fps"].getValue()
         publish_dir = instance.data.get("publishDir", None)
         version = instance.data.get("version", None)
@@ -149,7 +177,7 @@ class IntegrateProresReview(
         colorspace = instance.data.get("colorspace", None)
         framestart = instance.data["frameStart"]
         frameend = instance.data["frameEnd"]
-
+       
         shot = (
             anatomy_data := instance.data.get("anatomyData")
         ) and anatomy_data.get("asset")
@@ -205,6 +233,7 @@ class IntegrateProresReview(
             self.log.warning("failed to get project")
             raise Exception("failed to get project, failing")
 
+        self.log.info("integrate prores review debug")
         self.log.info(f"colorspace: {colorspace}")
         self.log.info(f"shot: {shot}")
         self.log.info(f"name: {name}")
@@ -212,6 +241,8 @@ class IntegrateProresReview(
         self.log.info(f"project: {project}")
         self.log.info(f"version: {version}")
         self.log.info(f"review_burnin: {review_burnin}")
+        self.log.info(f"deadline_pool: {deadline_pool}")
+        self.log.info(f"deadline_group: {deadline_group}")
 
         """
         File Sequence
@@ -324,6 +355,8 @@ class IntegrateProresReview(
             "render_target": render_target,
             "jobBatchName": job_batch_name,
             "currentFile": current_file,
+            "deadline_pool": deadline_pool,
+            "deadline_group": deadline_group,
         }
 
         self.log.debug(f"data: {data}")

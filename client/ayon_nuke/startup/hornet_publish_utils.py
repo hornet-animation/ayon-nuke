@@ -14,12 +14,14 @@ def quick_publish(
     integrate_farm=False,
     burnin=True,
     silent=False,
+    # pool="local",
+    # group="nuke",
 ):
     """
-    Submit a publish without using the ayon publish dialogue 
+    Submit a publish without using the ayon publish dialogue
 
     Args:
-        node (nuke.Node): The write group node 
+        node (nuke.Node): The write group node
         review (bool): Whether to generate review media
         review_farm (bool): Whether to generate review media on farm
         integrate_farm (bool): Whether to use farm integration ("frames_farm") or local ("frames")
@@ -29,6 +31,8 @@ def quick_publish(
     Returns:
         bool: True if successful, False if failed
     """
+
+    print("new quick publish")
 
     # Ensure code is executed in root context
     # if nuke.root() != nuke.thisNode():
@@ -48,16 +52,22 @@ def quick_publish(
     if integrate_farm:
         if not review_farm:
             review_farm = True
-            log.info("forcing review_farm to True because integrate_farm is True")
+            log.info(
+                "forcing review_farm to True because integrate_farm is True"
+            )
 
     try:
-        host = registered_host() # gets current host - nuke in this case
-        this_context = CreateContext(host) 
+        host = registered_host()  # gets current host - nuke in this case
+        this_context = CreateContext(host)
 
         # Find and activate only the specific instance we want to publish
         target_instance = None
-        for instance in this_context.instances: #instances are publishable asstets ie renders
-            if node.fullName() == instance.transient_data["node"].fullName(): # the write node
+        for instance in (
+            this_context.instances
+        ):  # instances are publishable asstets ie renders
+            if (
+                node.fullName() == instance.transient_data["node"].fullName()
+            ):  # the write node
                 instance.data["active"] = True
                 target_instance = instance
                 log.info(f"Activated instance: {instance}")
@@ -88,12 +98,70 @@ def quick_publish(
         target_instance.data["farm"] = integrate_farm
         log.info(f"Set farm flag to: {integrate_farm}")
 
+        # Inherit deadline pool and group settings from the write node
+        # Initialize publish_attributes if it doesn't exist
+        if "publish_attributes" not in target_instance.data:
+            target_instance.data["publish_attributes"] = {}
+
+        # Read deadline settings from the write node knobs
+        deadline_pool = (
+            node.knob("deadlinePool").value()
+            if node.knob("deadlinePool")
+            else None
+        )
+        deadline_group = (
+            node.knob("deadlineGroup").value()
+            if node.knob("deadlineGroup")
+            else None
+        )
+
+        nuke.tprint(f"quick_publish deadline_pool: {deadline_pool}")
+        nuke.tprint(f"quick_publish deadline_group: {deadline_group}")
+
+
+
+        # Set attributes for CollectJobInfo plugin (render jobs) via publish_attributes
+        # if deadline_pool or deadline_group:
+        #     publish_attrs = target_instance.data["publish_attributes"]
+
+        #     # Try to access the underlying data structure directly
+        #     if hasattr(publish_attrs, "_data"):
+        #         # Get or create CollectJobInfo attributes dictionary in the underlying data
+        #         if "CollectJobInfo" not in publish_attrs._data:
+        #             publish_attrs._data["CollectJobInfo"] = {}
+        #         collect_job_info_attrs = publish_attrs._data["CollectJobInfo"]
+
+        #         if deadline_pool:
+        #             collect_job_info_attrs["primary_pool"] = deadline_pool
+        #             log.info(
+        #                 f"Set CollectJobInfo primary_pool: {deadline_pool}"
+        #             )
+
+        #         if deadline_group:
+        #             collect_job_info_attrs["group"] = deadline_group
+        #             log.info(f"Set CollectJobInfo group: {deadline_group}")
+
+
+        # Set the values directly on instance data
+        if deadline_pool:
+            target_instance.data["deadline_pool"] = deadline_pool
+            target_instance.data["primary_pool"] = (
+                deadline_pool  # Try both names
+            )
+        if deadline_group:
+            target_instance.data["deadline_group"] = deadline_group
+            target_instance.data["group"] = deadline_group  # Try both names
+
+
         # Enable/disable review generation
         try:
             target_instance.data["creator_attributes"]["review"] = review
             log.info(f"Set review enabled: {review}")
         except Exception as e:
             log.warning(f"Could not set review setting: {e}")
+
+        print("a")
+        print(target_instance.data["creator_attributes"].keys())
 
         # farm or local for review
         try:
@@ -114,9 +182,26 @@ def quick_publish(
         except Exception as e:
             log.warning(f"Could not set review burnin setting: {e}")
 
+        print("begin quick_publish debug")
+        nuke.tprint("begin quick_publish debug")
+        print(deadline_pool)
+        nuke.tprint(deadline_pool)
+
+        creator_attrs = target_instance.data["creator_attributes"]
+        print(type(creator_attrs))
+        print(creator_attrs.keys())
+
+        target_instance.data["deadline_pool"] = deadline_pool
+        target_instance.data["deadline_group"] = deadline_group
+        
+        target_instance.data["test_key"] = "test_value"
+        print(target_instance.data["test_key"])
+        
+
+
         # pyblish context is different from the create context
         # it is the execution context for the plugins
-        context = pyblish.api.Context() 
+        context = pyblish.api.Context()
         context.data["create_context"] = this_context
         context.data["node_name"] = node.name()
 
@@ -131,24 +216,53 @@ def quick_publish(
         except Exception as e:
             log.warning(f"Could not get project settings: {e}")
 
-        # get all publish plugins 
+        # get all publish plugins
         plugins = pyblish.api.discover()
         log.info(
             f"Discovered {len(plugins)} plugins - following project settings"
         )
 
-        # Ensure IntegrateProresReview plugin is included
-        # prores_plugin = None
-        # for plugin in plugins:
-        #     if plugin.__name__ == "IntegrateProresReview":
-        #         prores_plugin = plugin
-        #         log.info("Found IntegrateProresReview plugin")
-        #         break
+        # CRITICAL: Apply AYON project settings to plugins
+        # This is normally done by filter_pyblish_plugins in the standard AYON pipeline
 
-        # if prores_plugin is None:
-        #     log.warning(
-        #         "IntegrateProresReview plugin not found - farm submission may not work"
-        #     )
+        from ayon_core.pipeline.publish.lib import filter_pyblish_plugins
+
+        # Apply settings to plugins - this includes deadline pool/group defaults
+        filter_pyblish_plugins(plugins)
+        nuke.tprint("Applied AYON project settings to plugins")
+
+        # ADDITIONAL: Override deadline plugin settings with values from the write node
+        # Find the deadline plugins and override their class attributes
+        for plugin in plugins:
+            if plugin.__name__ == "ProcessSubmittedJobOnFarm":
+                # Read the values we set on the instance
+                deadline_pool = target_instance.data.get("deadline_pool")
+                deadline_group = target_instance.data.get("deadline_group")
+                deadline_priority = target_instance.data.get(
+                    "deadline_priority"
+                )
+
+                if deadline_pool:
+                    plugin.deadline_pool = deadline_pool
+                    log.info(
+                        f"Override ProcessSubmittedJobOnFarm.deadline_pool: {deadline_pool}"
+                    )
+                if deadline_group:
+                    plugin.deadline_group = deadline_group
+                    log.info(
+                        f"Override ProcessSubmittedJobOnFarm.deadline_group: {deadline_group}"
+                    )
+                if deadline_priority:
+                    plugin.deadline_priority = deadline_priority
+                    log.info(
+                        f"Override ProcessSubmittedJobOnFarm.deadline_priority: {deadline_priority}"
+                    )
+
+            elif plugin.__name__ == "CollectJobInfo":
+                log.info(
+                    f"Found CollectJobInfo plugin - current profiles: {getattr(plugin, 'profiles', 'NOT SET')}"
+                )
+
 
         # save script before publishing
         nuke.scriptSave()
@@ -158,7 +272,7 @@ def quick_publish(
         log.info(f"Running {len(plugins)} plugins")
         context = pyblish.util.publish(context, plugins=plugins)
 
-        # did it work 
+        # did it work
         error_message = ""
         success = True
         for result in context.data.get("results", []):
@@ -166,7 +280,6 @@ def quick_publish(
                 success = False
                 err = result["error"]
 
-                
                 plugin_name = "Unknown"
                 if "plugin" in result:
                     plugin = result["plugin"]
@@ -202,10 +315,210 @@ def quick_publish(
             return True
 
     except Exception as e:
-        error_msg = f"Failed to publish {node.name()}: {str(e)}"
+        error_msg = f"quick_publish() Failed to publish {node.name()}: {str(e)}"
         log.error(error_msg)
         show_message_dialog("Publish Error", error_msg, level="critical")
         return False
+
+# def quick_publish(
+#     node,
+#     review=True,
+#     review_farm=True,
+#     integrate_farm=False,
+#     burnin=True,
+#     silent=False,
+# ):
+#     """
+#     Submit a publish without using the ayon publish dialogue 
+
+#     Args:
+#         node (nuke.Node): The write group node 
+#         review (bool): Whether to generate review media
+#         review_farm (bool): Whether to generate review media on farm
+#         integrate_farm (bool): Whether to use farm integration ("frames_farm") or local ("frames")
+#         burnin (bool): Whether to include burnins in review media
+#         silent (bool): Suppress popup messages
+
+#     Returns:
+#         bool: True if successful, False if failed
+#     """
+
+#     # Ensure code is executed in root context
+#     # if nuke.root() != nuke.thisNode():
+#     #     with nuke.root():
+#     #         return manual_publish_write_node(
+#     #             node,
+#     #             review,
+#     #             review_farm,
+#     #             integrate_farm,
+#     #             burnin,
+#     #             silent,
+#     #         )
+
+#     log = Logger.get_logger(__name__)
+#     log.info(f"Starting quick publish for node: {node.fullName()}")
+
+#     if integrate_farm:
+#         if not review_farm:
+#             review_farm = True
+#             log.info("forcing review_farm to True because integrate_farm is True")
+
+#     try:
+#         host = registered_host() # gets current host - nuke in this case
+#         this_context = CreateContext(host) 
+
+#         # Find and activate only the specific instance we want to publish
+#         target_instance = None
+#         for instance in this_context.instances: #instances are publishable asstets ie renders
+#             if node.fullName() == instance.transient_data["node"].fullName(): # the write node
+#                 instance.data["active"] = True
+#                 target_instance = instance
+#                 log.info(f"Activated instance: {instance}")
+#             else:
+#                 instance.data["active"] = False
+
+#         if target_instance is None:
+#             raise Exception(f"No instance found for node: {node.name()}")
+
+#         # Set render target based on integrate_farm
+#         render_target = "frames_farm" if integrate_farm else "frames"
+#         target_instance.data["render_target"] = render_target
+#         log.info(f"Set render target to: {render_target}")
+
+#         # Also set render_target in creator_attributes to prevent override from publish dialogue
+#         # not sure if we need both
+#         try:
+#             target_instance.data["creator_attributes"]["render_target"] = (
+#                 render_target
+#             )
+#             log.info(
+#                 f"Set creator_attributes render_target to: {render_target}"
+#             )
+#         except Exception as e:
+#             log.warning(f"Could not set creator_attributes render_target: {e}")
+
+#         # Set farm flag to enable deadline job submission when needed
+#         target_instance.data["farm"] = integrate_farm
+#         log.info(f"Set farm flag to: {integrate_farm}")
+
+#         # Enable/disable review generation
+#         try:
+#             target_instance.data["creator_attributes"]["review"] = review
+#             log.info(f"Set review enabled: {review}")
+#         except Exception as e:
+#             log.warning(f"Could not set review setting: {e}")
+
+#         # farm or local for review
+#         try:
+#             target_instance.data["creator_attributes"][
+#                 "hornet_review_use_farm"
+#             ] = review_farm
+#             farm_status = "farm" if review_farm else "local"
+#             log.info(f"Set review media generation to: {farm_status}")
+#         except Exception as e:
+#             log.warning(f"Could not set review farm setting: {e}")
+
+#         # Set review burnin setting
+#         try:
+#             target_instance.data["creator_attributes"]["review_burnin"] = (
+#                 burnin
+#             )
+#             log.info(f"Set review burnin to: {burnin}")
+#         except Exception as e:
+#             log.warning(f"Could not set review burnin setting: {e}")
+
+#         # pyblish context is different from the create context
+#         # it is the execution context for the plugins
+#         context = pyblish.api.Context() 
+#         context.data["create_context"] = this_context
+#         context.data["node_name"] = node.name()
+
+#         # add project settings for integrate_prores_review.py to work
+#         try:
+#             from ayon_core.settings import get_current_project_settings
+
+#             project_settings = get_current_project_settings()
+#             context.data["project_settings"] = project_settings
+#             log.info("Added project settings to context")
+
+#         except Exception as e:
+#             log.warning(f"Could not get project settings: {e}")
+
+#         # get all publish plugins 
+#         plugins = pyblish.api.discover()
+#         log.info(
+#             f"Discovered {len(plugins)} plugins - following project settings"
+#         )
+
+#         # Ensure IntegrateProresReview plugin is included
+#         # prores_plugin = None
+#         # for plugin in plugins:
+#         #     if plugin.__name__ == "IntegrateProresReview":
+#         #         prores_plugin = plugin
+#         #         log.info("Found IntegrateProresReview plugin")
+#         #         break
+
+#         # if prores_plugin is None:
+#         #     log.warning(
+#         #         "IntegrateProresReview plugin not found - farm submission may not work"
+#         #     )
+
+#         # save script before publishing
+#         nuke.scriptSave()
+
+#         # run pyblish
+#         log.info("Running pyblish...")
+#         log.info(f"Running {len(plugins)} plugins")
+#         context = pyblish.util.publish(context, plugins=plugins)
+
+#         # did it work 
+#         error_message = ""
+#         success = True
+#         for result in context.data.get("results", []):
+#             if not result["success"]:
+#                 success = False
+#                 err = result["error"]
+
+                
+#                 plugin_name = "Unknown"
+#                 if "plugin" in result:
+#                     plugin = result["plugin"]
+#                     if hasattr(plugin, "__name__"):
+#                         plugin_name = plugin.__name__
+
+#                 # for validation errors log the actual error message
+#                 if hasattr(err, "args") and err.args:
+#                     actual_error = (
+#                         str(err.args[0]) if err.args[0] else str(err)
+#                     )
+#                 else:
+#                     actual_error = str(err)
+
+#                 log.error(f"Plugin {plugin_name} failed: {actual_error}")
+#                 error_message += f"\n{actual_error}"
+
+#         if not success:
+#             if not silent:
+#                 show_message_dialog(
+#                     "Publish Errors",
+#                     f"Publish failed for {node.name()}:\n{error_message}",
+#                     level="critical",
+#                 )
+#             return False
+#         else:
+#             log.info(f"Successfully published: {node.name()}")
+#             if not silent:
+#                 show_message_dialog(
+#                     "Publish Successful",
+#                     f"Submitted {node.name()} for publish",
+#                 )
+#             return True
+
+#     except Exception as e:
+#         error_msg = f"Failed to publish {node.name()}: {str(e)}"
+#         log.error(error_msg)
+#         show_message_dialog("Publish Error", error_msg, level="critical")
+#         return False
 
 
 def batch_publish_write_nodes(
