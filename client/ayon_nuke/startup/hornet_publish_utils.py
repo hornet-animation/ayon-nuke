@@ -14,6 +14,8 @@ def quick_publish(
     integrate_farm=False,
     burnin=True,
     silent=False,
+    # pool="local",
+    # group="nuke",
 ):
     """
     Submit a publish without using the ayon publish dialogue
@@ -113,6 +115,9 @@ def quick_publish(
             else None
         )
 
+        nuke.tprint(f"quick_publish deadline_pool: {deadline_pool}")
+        nuke.tprint(f"quick_publish deadline_group: {deadline_group}")
+
 
 
         # Set attributes for CollectJobInfo plugin (render jobs) via publish_attributes
@@ -155,6 +160,9 @@ def quick_publish(
         except Exception as e:
             log.warning(f"Could not set review setting: {e}")
 
+        print("a")
+        print(target_instance.data["creator_attributes"].keys())
+
         # farm or local for review
         try:
             target_instance.data["creator_attributes"][
@@ -173,6 +181,23 @@ def quick_publish(
             log.info(f"Set review burnin to: {burnin}")
         except Exception as e:
             log.warning(f"Could not set review burnin setting: {e}")
+
+        print("begin quick_publish debug")
+        nuke.tprint("begin quick_publish debug")
+        print(deadline_pool)
+        nuke.tprint(deadline_pool)
+
+        creator_attrs = target_instance.data["creator_attributes"]
+        print(type(creator_attrs))
+        print(creator_attrs.keys())
+
+        target_instance.data["deadline_pool"] = deadline_pool
+        target_instance.data["deadline_group"] = deadline_group
+        
+        target_instance.data["test_key"] = "test_value"
+        print(target_instance.data["test_key"])
+        
+
 
         # pyblish context is different from the create context
         # it is the execution context for the plugins
@@ -290,7 +315,7 @@ def quick_publish(
             return True
 
     except Exception as e:
-        error_msg = f"Failed to publish {node.name()}: {str(e)}"
+        error_msg = f"quick_publish() Failed to publish {node.name()}: {str(e)}"
         log.error(error_msg)
         show_message_dialog("Publish Error", error_msg, level="critical")
         return False

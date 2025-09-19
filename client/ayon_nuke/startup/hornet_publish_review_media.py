@@ -126,10 +126,8 @@ def hornet_review_media_submit(data, logger=None):
             "task_name": f"{data['shot']}_{data['name']}_{node_name}_review",
             "deadlinePriority": 95,
             "deadlinePool": data.get("deadline_pool", "local"),
-            "deadlineGroup": "nuke",
-            "deadlineChunkSize": last
-            - first
-            + 1,  # Render entire sequence in one chunk for review media
+            "deadlineGroup": data.get("deadline_group", "nuke"),
+            "deadlineChunkSize": last - first + 1,  # Render entire sequence in one chunk for review media
             "concurrentTasks": 1,
             "Frames": f"{first}-{last}",  # Let Deadline determine frame range from node metadata
             "write_node_name": f"{node_name}",

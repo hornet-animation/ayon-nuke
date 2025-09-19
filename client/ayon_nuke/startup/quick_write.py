@@ -3,6 +3,7 @@ import os
 from ayon_nuke import api
 import json
 from ayon_core.lib import Logger
+from ayon_core.settings import get_current_project_settings
 
 from ayon_nuke.api.lib import (
     create_write_node,
@@ -373,7 +374,8 @@ def embedOptions():
 
     deadlineChunkSize.setValue(1)
     concurrentTasks.setValue(2)
-    deadlinePool.setValue("local")
+    # deadlinePool.setValue("local")
+    deadlinePool.setValue(get_deadlin_pool())
     deadlineGroup.setValue("nuke")
     deadlinePriority.setValue(90)
 
@@ -416,6 +418,8 @@ def embedOptions():
     endGroup = nuke.Tab_Knob("endpipeline", None, nuke.TABENDGROUP)
 
     group.addKnob(endGroup)
+
+
 
 
 def show_quick_publish_info():
@@ -755,3 +759,10 @@ def quick_publish_wrapper(node):
             integrate_farm=integrate_farm,
             burnin=burnin,
         )
+
+def get_deadlin_pool():
+    settings = get_current_project_settings()
+    try:
+        return settings["deadline"]["publish"]["CollectDeadlinePools"]["primary_pool"]
+    except KeyError:
+        return "local"
