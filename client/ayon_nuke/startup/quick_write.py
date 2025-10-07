@@ -33,7 +33,7 @@ knobMatrix = {
     "jpeg": [],
 }
 
-universalKnobs = ["colorspace", "views"]
+universalKnobs = ["colorspace", "views","raw"]
 
 knobMatrix = {key: universalKnobs + value for key, value in knobMatrix.items()}
 presets = {
@@ -175,7 +175,10 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
         inside_write = nuke.toNode(
             "inside_" + family + os.environ["AYON_TASK_NAME"] + variant.title()
         )
-        inside_write.knob("file_type").setValue("exr")
+        if family == "prerender":
+            inside_write.knob("file_type").setValue("exr")
+        else:
+            inside_write.knob("file_type").setValue("dpx")
 
     return qnode
 
@@ -259,11 +262,13 @@ def embedOptions():
 
     renderFirst = nuke.Link_Knob("first")
     renderFirst.makeLink(nde.name(), "first")
-    renderFirst.setName("Render Start")
+    renderFirst.setName("first")
+    renderFirst.setLabel("Render Start")
 
     renderLast = nuke.Link_Knob("last")
     renderLast.makeLink(nde.name(), "last")
-    renderLast.setName("Render End")
+    renderLast.setName("last")
+    renderLast.setLabel("Render End")
 
     publishFirst = nuke.Int_Knob("publishFirst", "Publish Start")
     publishLast = nuke.Int_Knob("publishLast", "Publish End")
@@ -681,8 +686,7 @@ def update_ovs_write_version(node):
                 f"{node.name()} is missing is_ovs key, it is probably an old node"
             )
         else:
-            if data["is_ovs"]:
-
+            if data["is_ovs"] and not check_existing_files_pattern(node):
                 prompt = nuke.ask("Set render output path to latest new product version?")
                 if prompt:
                     try:

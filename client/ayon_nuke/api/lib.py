@@ -6208,7 +6208,7 @@ def get_ovs_pathing(data):
     file_string = StringTemplate(file_template).format_strict(file_data)
     publish_path /= file_string
 
-    return str(publish_path)
+    return publish_path.as_posix()
 
 
 def incriment_pub_version(version_num, version_name):

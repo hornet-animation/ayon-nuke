@@ -49,6 +49,39 @@ class CollectInstanceData(pyblish.api.InstancePlugin):
         creator_attributes = instance.data["creator_attributes"]
         instance.data.update(creator_attributes)
 
+        # Check if this is a single frame render and override family to 'image'
+        # Get frame range directly from write node since frameStart/frameEnd aren't set yet
+        if product_type in ["render", "prerender"]:
+            group_node = instance.data["transientData"]["node"]
+
+            # Find write node inside the group
+            write_node = None
+            if group_node.Class() == "Group":
+                with group_node:
+                    for child_node in nuke.allNodes():
+                        if child_node.Class() == "Write":
+                            write_node = child_node
+                            break
+
+            if write_node:
+                first_frame = int(write_node["first"].getValue())
+                last_frame = int(write_node["last"].getValue())
+
+                if first_frame == last_frame:
+                    self.log.info(
+                        f"Single frame detected ({first_frame}) - setting family to 'image', render_target to 'frames', and disabling review"
+                    )
+                    instance.data["family"] = "image"
+                    instance.data["render_target"] = "frames"
+                    # Disable review for single frames
+                    instance.data["review"] = False
+                    if "creator_attributes" in instance.data:
+                        instance.data["creator_attributes"]["review"] = False
+                    # Add _singleFrame suffix to product name
+                    if not instance.data["productName"].endswith("_singleFrame"):
+                        instance.data["productName"] = instance.data["productName"] + "_singleFrame"
+                        self.log.info(f"Renamed product to: {instance.data['productName']}")
+
         # add review family if review activated on instance
         if instance.data.get("review"):
             instance.data["families"].append("review")

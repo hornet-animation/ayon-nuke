@@ -13,6 +13,7 @@ Alex H
 """
 import nuke
 import os
+import json
 import quick_write
 import read_node_utils
 from view_manager import show as show_view_manager
@@ -127,6 +128,72 @@ def writes_ver_sync():
                     )
                 )
 
+def warnSingleFrame():
+    singleFrameWarn = nuke.Text_Knob(
+        "singleFrameWarn",
+        "",
+        "- render start and end are the same, quick publish type will be changed to Image",
+    )
+    nde = nuke.thisNode()
+    knb = nuke.thisKnob()
+    group = nde.parent()
+    if knb.name() == "first" or knb.name() == "last":
+        if not knb.value():
+            return
+        first = nde.knob("first").value()
+        last = nde.knob("last").value()
+        if first == last:
+            if not group.knob("singleFrameWarn"):
+                group.addKnob(singleFrameWarn)
+
+            if not group.knob("_saved_knob_states"):
+                saved_knob = nuke.String_Knob("_saved_knob_states", "")
+                saved_knob.setVisible(False)
+                group.addKnob(saved_knob)
+
+            saved_states = {}
+            if group.knob("generate_review_media"):
+                saved_states["generate_review_media"] = group.knob("generate_review_media").value()
+                group.knob("generate_review_media").setValue(False)
+                group.knob("generate_review_media").setEnabled(False)
+
+            if group.knob("generate_review_media_on_farm"):
+                saved_states["generate_review_media_on_farm"] = group.knob("generate_review_media_on_farm").value()
+                group.knob("generate_review_media_on_farm").setValue(False)
+                group.knob("generate_review_media_on_farm").setEnabled(False)
+
+            if group.knob("publish_on_farm"):
+                saved_states["publish_on_farm"] = group.knob("publish_on_farm").value()
+                group.knob("publish_on_farm").setValue(False)
+                group.knob("publish_on_farm").setEnabled(False)
+
+            group.knob("_saved_knob_states").setValue(json.dumps(saved_states))
+
+        else:
+            if group.knob("singleFrameWarn"):
+                group.removeKnob(group.knob("singleFrameWarn"))
+
+            saved_states = {}
+            if group.knob("_saved_knob_states"):
+                try:
+                    saved_states = json.loads(group.knob("_saved_knob_states").value())
+                except (json.JSONDecodeError, ValueError):
+                    saved_states = {}
+
+            if group.knob("generate_review_media"):
+                group.knob("generate_review_media").setEnabled(True)
+                if "generate_review_media" in saved_states:
+                    group.knob("generate_review_media").setValue(saved_states["generate_review_media"])
+
+            if group.knob("generate_review_media_on_farm"):
+                group.knob("generate_review_media_on_farm").setEnabled(True)
+                if "generate_review_media_on_farm" in saved_states:
+                    group.knob("generate_review_media_on_farm").setValue(saved_states["generate_review_media_on_farm"])
+
+            if group.knob("publish_on_farm"):
+                group.knob("publish_on_farm").setEnabled(True)
+                if "publish_on_farm" in saved_states:
+                    group.knob("publish_on_farm").setValue(saved_states["publish_on_farm"])
 
 def switchExtension():
 
@@ -204,6 +271,10 @@ m.addCommand(
     "quick_write_node(family='prerender')",
     "Ctrl+Shift+W",
 )
+m.addCommand(
+    "&Quick Single Frame Write Node",
+    "quick_write_node(family='image')"
+)
 m.addCommand("&Oversized Write Node", "ovs_write_node()")
 m.addCommand(
         "Views Write Node",
@@ -217,6 +288,7 @@ nuke.addKnobChanged(embedOptions, nodeClass="Write")
 nuke.addKnobChanged(embed_experimental, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
 nuke.addKnobChanged(handle_farm_publish_logic, nodeClass="Group")
+nuke.addKnobChanged(warnSingleFrame, nodeClass="Write")
 nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
 #nuke.addOnScriptSave(set_hwrite_version)
 nuke.addOnScriptSave(writes_ver_sync)

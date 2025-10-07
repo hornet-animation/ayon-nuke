@@ -236,6 +236,16 @@ def assemble_publish_path(ayon_write_node):
     else:
         is_ovs = False
 
+    # Check if last publish was single frame and adjust product name
+    is_single_frame = False
+    if ayon_write_node.knob("_last_publish_single_frame"):
+        is_single_frame = ayon_write_node.knob("_last_publish_single_frame").value()
+
+    if is_single_frame:
+        # Add _singleFrame suffix to product name to match publish folder
+        if not name.endswith("_singleFrame"):
+            name = name + "_singleFrame"
+
     # If the write node path is linked to a version file, get the version from there
     server_version = get_server_pub_version(project_name, name, context["folder_path"])
     if is_version_file_linked() and is_ovs:
@@ -330,11 +340,17 @@ def assemble_publish_path(ayon_write_node):
 
     result = publish_path / file_string
 
-    fs = SequenceFactory.from_sequence_string_absolute(result)
-    result = (
-        f"{fs.absolute_file_name} {fs.first_frame}-{fs.last_frame}"
-    )
-    result = pathlib.Path(result)
+    if is_single_frame:
+        # For single frames, remove frame number from path
+        result = str(result).replace(".%04d", "")
+        result = pathlib.Path(result)
+    else:
+        # For sequences, add frame range
+        fs = SequenceFactory.from_sequence_string_absolute(result)
+        result = (
+            f"{fs.absolute_file_name} {fs.first_frame}-{fs.last_frame}"
+        )
+        result = pathlib.Path(result)
 
     print(result)
     log.debug(f"Assembled publish path:{result}")

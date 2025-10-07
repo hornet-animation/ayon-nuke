@@ -184,6 +184,13 @@ class CollectNukeWrites(
         """
         product_type = instance.data["productType"]
 
+        # Check if this is a single frame render - detect it here directly
+        first_frame, last_frame = self._get_frame_range_data(instance)
+        if first_frame == last_frame:
+            product_type = "image"
+            instance.data["family"] = "image"
+            self.log.info(f"Single frame detected ({first_frame}) - treating as image product type")
+
         # add targeted family to families
         if render_target == "frames_farm":
             instance.data["families"].append(

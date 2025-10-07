@@ -32,8 +32,6 @@ def quick_publish(
         bool: True if successful, False if failed
     """
 
-    print("new quick publish")
-
     # Ensure code is executed in root context
     # if nuke.root() != nuke.thisNode():
     #     with nuke.root():
@@ -49,16 +47,27 @@ def quick_publish(
     log = Logger.get_logger(__name__)
     log.info(f"Starting quick publish for node: {node.fullName()}")
 
-    if integrate_farm:
-        if not review_farm:
-            review_farm = True
-            log.info(
-                "forcing review_farm to True because integrate_farm is True"
-            )
+    # Create progress task immediately
+    task = nuke.ProgressTask("Quick Publishing")
+    task.setMessage("Initializing publish...")
+    task.setProgress(0)
 
     try:
+        if integrate_farm:
+            if not review_farm:
+                review_farm = True
+                log.info(
+                    "forcing review_farm to True because integrate_farm is True"
+                )
+
+        task.setMessage("Loading publish context...")
+        task.setProgress(5)
+
         host = registered_host()  # gets current host - nuke in this case
         this_context = CreateContext(host)
+
+        task.setMessage("Finding publish instance...")
+        task.setProgress(10)
 
         # Find and activate only the specific instance we want to publish
         target_instance = None
@@ -77,6 +86,22 @@ def quick_publish(
         if target_instance is None:
             raise Exception(f"No instance found for node: {node.name()}")
 
+        # Check if this is a single frame render by checking the write node's frame range
+        write_node = None
+        group_node = node
+        if group_node.Class() == "Group":
+            with group_node:
+                for child_node in nuke.allNodes():
+                    if child_node.Class() == "Write":
+                        write_node = child_node
+                        break
+
+        if write_node:
+            first_frame = int(write_node["first"].getValue())
+            last_frame = int(write_node["last"].getValue())
+            if first_frame == last_frame:
+                log.info(f'Single frame render detected ({first_frame}), switching publish to "image" family')
+                target_instance.data['family'] = 'image'
         # Set render target based on integrate_farm
         render_target = "frames_farm" if integrate_farm else "frames"
         target_instance.data["render_target"] = render_target
@@ -199,6 +224,9 @@ def quick_publish(
         
 
 
+        task.setMessage("Configuring instance settings...")
+        task.setProgress(15)
+
         # pyblish context is different from the create context
         # it is the execution context for the plugins
         context = pyblish.api.Context()
@@ -215,6 +243,9 @@ def quick_publish(
 
         except Exception as e:
             log.warning(f"Could not get project settings: {e}")
+
+        task.setMessage("Discovering publish plugins...")
+        task.setProgress(20)
 
         # get all publish plugins
         plugins = pyblish.api.discover()
@@ -264,60 +295,145 @@ def quick_publish(
                 )
 
 
+        task.setMessage("Saving script...")
+        task.setProgress(25)
+
         # save script before publishing
         nuke.scriptSave()
 
-        # run pyblish
+        task.setMessage("Starting publish...")
+        task.setProgress(30)
+
+        # run pyblish with progress tracking
         log.info("Running pyblish...")
         log.info(f"Running {len(plugins)} plugins")
-        context = pyblish.util.publish(context, plugins=plugins)
 
-        # did it work
+        # Track progress through pyblish callbacks
+        completed_plugins = [0]  # Use list to allow modification in nested function
+        total_plugins = len(plugins)
+
+        def on_plugin_processed(*args, **kwargs):
+            """Callback fired after each plugin processes"""
+            completed_plugins[0] += 1
+            # Map plugin progress from 30% to 100% (70% of total progress bar)
+            plugin_progress = int((completed_plugins[0] / total_plugins) * 70)
+            total_progress = 30 + plugin_progress
+            task.setProgress(total_progress)
+
+            # Extract plugin name - try multiple approaches
+            plugin_name = "Unknown"
+
+            # Try getting from kwargs
+            if 'plugin' in kwargs:
+                plugin = kwargs['plugin']
+                if hasattr(plugin, '__name__'):
+                    plugin_name = plugin.__name__
+                elif hasattr(plugin, 'label'):
+                    plugin_name = plugin.label
+                elif hasattr(plugin, 'name'):
+                    plugin_name = plugin.name
+                elif isinstance(plugin, type):
+                    plugin_name = plugin.__name__
+
+            # Try getting from args
+            elif args and len(args) > 0:
+                plugin = args[0]
+                if hasattr(plugin, '__name__'):
+                    plugin_name = plugin.__name__
+                elif hasattr(plugin, 'label'):
+                    plugin_name = plugin.label
+                elif isinstance(plugin, type):
+                    plugin_name = plugin.__name__
+
+            task.setMessage(f"Running {plugin_name}... ({completed_plugins[0]}/{total_plugins})")
+
+            # Check if user cancelled
+            if task.isCancelled():
+                raise Exception("Publish cancelled by user")
+
+        # Register callback
+        pyblish.api.register_callback("pluginProcessed", on_plugin_processed)
+
+        # Track success state for cleanup
+        success = False
         error_message = ""
-        success = True
-        for result in context.data.get("results", []):
-            if not result["success"]:
-                success = False
-                err = result["error"]
 
-                plugin_name = "Unknown"
-                if "plugin" in result:
-                    plugin = result["plugin"]
-                    if hasattr(plugin, "__name__"):
-                        plugin_name = plugin.__name__
+        try:
+            context = pyblish.util.publish(context, plugins=plugins)
 
-                # for validation errors log the actual error message
-                if hasattr(err, "args") and err.args:
-                    actual_error = (
-                        str(err.args[0]) if err.args[0] else str(err)
+            # did it work
+            success = True
+            for result in context.data.get("results", []):
+                if not result["success"]:
+                    success = False
+                    err = result["error"]
+
+                    plugin_name = "Unknown"
+                    if "plugin" in result:
+                        plugin = result["plugin"]
+                        if hasattr(plugin, "__name__"):
+                            plugin_name = plugin.__name__
+
+                    # for validation errors log the actual error message
+                    if hasattr(err, "args") and err.args:
+                        actual_error = (
+                            str(err.args[0]) if err.args[0] else str(err)
+                        )
+                    else:
+                        actual_error = str(err)
+
+                    log.error(f"Plugin {plugin_name} failed: {actual_error}")
+                    error_message += f"\n{actual_error}"
+
+            if not success:
+                if not silent:
+                    show_message_dialog(
+                        "Publish Errors",
+                        f"Publish failed for {node.name()}:\n{error_message}",
+                        level="critical",
                     )
+                return False
+            else:
+                log.info(f"Successfully published: {node.name()}")
+
+                # Save if this was a single frame publish for Read from Published
+                if target_instance.data.get("family") == "image":
+                    if not node.knob("_last_publish_single_frame"):
+                        knob = nuke.Boolean_Knob("_last_publish_single_frame", "")
+                        knob.setVisible(False)
+                        node.addKnob(knob)
+                    node.knob("_last_publish_single_frame").setValue(True)
                 else:
-                    actual_error = str(err)
+                    if not node.knob("_last_publish_single_frame"):
+                        knob = nuke.Boolean_Knob("_last_publish_single_frame", "")
+                        knob.setVisible(False)
+                        node.addKnob(knob)
+                    node.knob("_last_publish_single_frame").setValue(False)
 
-                log.error(f"Plugin {plugin_name} failed: {actual_error}")
-                error_message += f"\n{actual_error}"
-
-        if not success:
-            if not silent:
-                show_message_dialog(
-                    "Publish Errors",
-                    f"Publish failed for {node.name()}:\n{error_message}",
-                    level="critical",
-                )
-            return False
-        else:
-            log.info(f"Successfully published: {node.name()}")
-            if not silent:
-                show_message_dialog(
-                    "Publish Successful",
-                    f"Submitted {node.name()} for publish",
-                )
-            return True
+                if not silent:
+                    show_message_dialog(
+                        "Publish Successful",
+                        f"Submitted {node.name()} for publish",
+                    )
+                return True
+        finally:
+            # Clean up progress task - always runs whether success or failure
+            pyblish.api.deregister_callback("pluginProcessed", on_plugin_processed)
+            task.setProgress(100)
+            task.setMessage("Publish complete" if success else "Publish failed")
+            del task
 
     except Exception as e:
         error_msg = f"quick_publish() Failed to publish {node.name()}: {str(e)}"
         log.error(error_msg)
         show_message_dialog("Publish Error", error_msg, level="critical")
+
+        # Clean up progress task if exception happened before pyblish execution
+        if 'task' in locals():
+            task.setProgress(100)
+            task.setMessage("Publish failed")
+            del task
+
         return False
 
 # def quick_publish(
