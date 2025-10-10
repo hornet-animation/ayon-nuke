@@ -581,9 +581,21 @@ class Render_submission_dialog(QtWidgets.QDialog):
             if reply == QtWidgets.QMessageBox.Yes:
                 self.submission_type = "local"
                 self.apply_settings()
-                submit_renders_local(data, self.kroger_node)
-                print("Local render data:", data)
+
+                # Close the dialog first so users can see Nuke's progress bars
                 self.accept()
+
+                # Run the renders after dialog is closed
+                try:
+                    submit_renders_local(data, self.kroger_node)
+                    print("Local render data:", data)
+                except Exception as e:
+                    # Show error message after renders fail
+                    QtWidgets.QMessageBox.critical(
+                        None,  # No parent since dialog is closed
+                        "Local Render Error",
+                        f"An error occurred during local rendering:\n{str(e)}",
+                    )
 
     def submit_to_farm(self):
         """Handle submit to farm button click"""
@@ -1492,6 +1504,7 @@ def pregenerate_writes_button_callback():
 
     # Get current views from the script
     current_views = nuke.views()
+    update_views_list(views_write_node)
 
     if not current_views:
         nuke.message("No views found in the current script.")
@@ -1512,9 +1525,9 @@ def pregenerate_writes_button_callback():
         )
 
         # Show success message
-        nuke.message(
+        nuke.tprint(
             f"Successfully pregenerated write nodes for {len(current_views)} view(s):\n"
-            + "\n".join(f"• {view}" for view in current_views)
+            + "\n".join(f"- {view}" for view in current_views)
         )
 
     except Exception as e:
@@ -1671,7 +1684,8 @@ def submit_renders_local(data, viewsWrite, sub_write_node_generator=None):
     apply_settings_to_nodes(data, viewsWrite, debug=False)
 
     # Now render locally
-    for view_name in selected_views:
+    total_views = len(selected_views)
+    for i, view_name in enumerate(selected_views, 1):
         if view_name not in view_to_node:
             print(
                 f"Warning: No node found for view '{view_name}', skipping..."
@@ -1680,7 +1694,8 @@ def submit_renders_local(data, viewsWrite, sub_write_node_generator=None):
             continue
 
         node = view_to_node[view_name]
-        print(node.fullName())
+        print(f"Rendering {i}/{total_views}: {node.fullName()}")
+
         try:
             # Get frame range for this view
             view_data = data["view_data"][view_name]
@@ -1695,13 +1710,17 @@ def submit_renders_local(data, viewsWrite, sub_write_node_generator=None):
                 # Single frame
                 start_frame = end_frame = int(frame_range.strip())
 
+            print(
+                f"  Rendering frames {start_frame}-{end_frame} for view '{view_name}'..."
+            )
+
             # Execute the render locally
             nuke.execute(node, start_frame, end_frame)
             succeeded += 1
-            print(f"Successfully rendered locally: {view_name}")
+            print(f"  ✓ Successfully rendered locally: {view_name}")
 
         except Exception as e:
-            print(f"Failed to render view '{view_name}' locally: {str(e)}")
+            print(f"  ✗ Failed to render view '{view_name}' locally: {str(e)}")
             failed += 1
 
     # Show results
@@ -2219,7 +2238,7 @@ def batch_publish(
             burnin=burnin,
             silent=silent,
             pool=pool,
-            group=group
+            group=group,
         )
 
         print("[OK] Batch publish completed successfully")
@@ -2239,6 +2258,36 @@ def batch_publish(
 def render_approval_frames(
     local, views, frame, format, colorspace, viewsWrite=None
 ):
+    """Render approval frames for specified views and frame number.
+    
+    This function generates and executes write nodes to render "approval frames"
+    which are a single specified frame for every "view".
+
+    They are rquired to render directly to the publish directory bypassing pyblish pipeline,
+    therefore vanilla write nodes are used and the publish directory is resolved from the
+    Ayon API.
+
+    
+    Args:
+        local (bool): If True, renders locally using nuke.execute(). 
+                     If False, submits to farm using Deadline.
+        views (list): List of view names to render (e.g., ['left', 'right']).
+        frame (int): Frame number to render.
+        format (str): Output file format (e.g., 'png', 'dpx', 'exr').
+        colorspace (str): Colorspace to use for rendering (e.g., 'Output - sRGB').
+        viewsWrite (nuke.Group, optional): The views write node group to use.
+                                          If None, uses the current node.
+    
+    Raises:
+        ValueError: If viewsWrite is not a Group node.
+    
+    Note:
+        - Creates temporary write nodes for each view
+        - Renders to approval_frames directory in publish root
+        - File naming pattern: {view}_v{version}.{frame}.{format}
+        - Automatically cleans up temporary write nodes after rendering
+        - Uses batch name: {script_name}__approval_frames for farm submissions
+    """
     if viewsWrite is None:
         views_write = nuke.thisNode()
     writes = generate_review_frame_write_nodes(
@@ -2300,7 +2349,7 @@ def generate_review_frame_write_node(view, frame, format, colorspace, root):
     file_path = (
         pathlib.Path(root)
         / "approval_frames"
-        / version
+        / f"v{version}"
         / f"{view}_v{version}.{frame}.{format}"
     )
 
@@ -2380,3 +2429,18 @@ def views_write_read_from_publish(node):
         for write_group in nodes:
             read_node_utils.read_from_publish(write_group, xypos=xypos)
             xypos[0] += 100
+
+
+def sanitize_aspect():
+    node = nuke.thisNode()
+    knob = nuke.thisKnob()
+    try:
+        if knob.name() == "aspect":
+            aspect = knob.value()
+            knob.setValue(aspect.replace(" ", "_").replace(":", "x"))
+        else:
+            return None
+    except Exception as e:
+        print(f"Error sanitizing aspect: {e}")
+        return None
+    

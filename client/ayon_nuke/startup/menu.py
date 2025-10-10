@@ -201,7 +201,6 @@ def switchExtension():
     knb = nuke.thisKnob()
     
     if nde is None or knb is None:
-        print("warning: nde or knb is None")
         return
 
     if knb == nde.knob("file_type"):
@@ -302,6 +301,7 @@ nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
 
 
 nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
+nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
 
 ### View Manager
 

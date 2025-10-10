@@ -434,6 +434,12 @@ def embedOptions():
     endGroup = nuke.Tab_Knob("endpipeline", None, nuke.TABENDGROUP)
 
     group.addKnob(endGroup)
+    try:
+        group["views"].setValue(nuke.views()[0])
+    except Exception as e:
+        print(f"Error setting views: {e}")
+
+
 
 
 def show_quick_publish_info():
