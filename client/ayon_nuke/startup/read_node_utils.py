@@ -128,10 +128,13 @@ def create_read_node(ndata, comp_start):
     read.knob("xpos").setValue(ndata["new_xpos"])
     read.knob("ypos").setValue(ndata["new_ypos"])
     nuke.inputs(read, 0)
-    return
+    return read
 
 
-def write_to_read(write_group_node, allow_relative=False):
+def write_to_read(write_group_node, allow_relative=False, context=None, xypos=None):
+
+    current_context = nuke.thisNode()
+
     comp_start = nuke.Root().knob("first_frame").value()
     project_dir = nuke.Root().knob("project_directory").getValue()
     if not os.path.exists(project_dir):
@@ -188,11 +191,17 @@ def write_to_read(write_group_node, allow_relative=False):
                 }
                 group_read_nodes.append(ndata)
 
-    # create reads in one go
-    for oneread in group_read_nodes:
-        # create read node
-        create_read_node(oneread, comp_start)
-
+    if context is not None:
+        with context:
+ 
+            for oneread in group_read_nodes:
+                read = create_read_node(oneread, comp_start)
+    else:
+        for oneread in group_read_nodes:
+            read = create_read_node(oneread, comp_start)
+    
+    if xypos is not None:
+        read.setXYpos(xypos[0], xypos[1])
 
 def slice_path(path, start, end):
     # return a re-joined path from a slice of path parts
@@ -337,8 +346,16 @@ def assemble_publish_path(ayon_write_node):
 
     # sequence = seqs[0]
     # string = sequence.sequence_string(sequence.StringVariant.NUKE)
+    
+    # if not publish_path.exists():
+    #     print(f"publish_path does not exist: {publish_path}")
+    #     return None
 
     result = publish_path / file_string
+
+    if not publish_path.exists():
+        print(f"publish_path does not exist: {publish_path}")
+        return None
 
     if is_single_frame:
         # For single frames, remove frame number from path
@@ -358,7 +375,7 @@ def assemble_publish_path(ayon_write_node):
     return result
 
 
-def read_from_publish(ayon_write_node):
+def read_from_publish(ayon_write_node, context = None, xypos = None):
     if (ayon_write_node) is None:
         log.error("ayon_write_node is None")
         nuke.tprint("ayon_write_node is None")
@@ -367,6 +384,10 @@ def read_from_publish(ayon_write_node):
         ppath = assemble_publish_path(ayon_write_node)
         if not ppath:
             return
+
+        if not ppath.exists():
+            print("absolutely no publishes were discovered.")
+
         publish_path = ppath.as_posix()
 
         if (publish_path) is None:
@@ -375,10 +396,15 @@ def read_from_publish(ayon_write_node):
         read_node = nuke.nodes.Read()
         read_node["file"].fromUserText(publish_path)
 
-        read_node.setXYpos(
-            int(ayon_write_node["xpos"].getValue()),
-            int(ayon_write_node["ypos"].getValue()) + 60,
-        )
+        if xypos is not None:
+            read_node.setXYpos(xypos[0], xypos[1])
+
+        else:
+            read_node.setXYpos(
+                int(ayon_write_node["xpos"].getValue()),
+                int(ayon_write_node["ypos"].getValue()) + 60,
+            )
+        return read_node
 
 
 def get_publish_instance_data(write_node):
@@ -420,6 +446,11 @@ def navigate_to_publish(write_node):
     path = assemble_publish_path(write_node)
     if not path:
         return
+    
+    if not path.exists():
+        print("absolutely no publishes were discovered.")
+        return
+    
     path = path.parent
 
     print(f"Publish path: {path}")

@@ -223,7 +223,7 @@ def generate_review_media_local(data, logger=None, debug=False):
     # render the review media - on farm handled by the deadline plugin 
     for node_name in write_nodes:
         n = nuke.toNode(node_name)
-
+        
         output_path = Path(data["publishDir"]) / "review"
         output_name = data["shot"]+"_"+data["name"]+"_"+node_name
         output_path_key = "REVIEW_"+node_name

@@ -1,9 +1,14 @@
-import nuke
-import ast
+import pathlib
 
+# from turtle import color
+import nuke
+
+import ast
+import hornet_deadline_utils
 
 from PySide2 import QtWidgets, QtCore  # type: ignore
-
+from ayon_core.pipeline import registered_host, Anatomy
+from ayon_nuke.api.lib import get_version_from_path
 
 # COLORSPACE_LIST = [
 #     "Output - Rec.709",
@@ -23,11 +28,15 @@ DEFAULT_DIALOG_HEIGHT = 1000
 APPROVAL_FRAME_DEFAULT_COLORSPACE = "Output - sRGB"
 APPROVAL_FRAME_DEFAULT_FILE_FORMAT = "png"
 
+
 class Render_submission_dialog(QtWidgets.QDialog):
     def __init__(self, parent=None, saved_data=None, kroger_node=None):
         super().__init__(parent)
         self.saved_data = saved_data or {}
         self.kroger_node = kroger_node
+        self.submission_type = (
+            None  # Track which type of submission was performed
+        )
         self.setup_ui()
         self.populate_view_table()
         self.load_saved_data()
@@ -175,17 +184,26 @@ class Render_submission_dialog(QtWidgets.QDialog):
         test_layout.addStretch()
         layout.addLayout(test_layout)
 
-        # Dialog buttons - Submit and Cancel side by side
-        button_box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        )
-        # Change the OK button text to Submit
-        submit_button = button_box.button(QtWidgets.QDialogButtonBox.Ok)
-        submit_button.setText("Submit")
+        # Dialog buttons - Submit Local, Submit to Farm, and Cancel
+        button_layout = QtWidgets.QHBoxLayout()
 
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        self.submit_local_btn = QtWidgets.QPushButton("Submit Local")
+
+        self.submit_local_btn.clicked.connect(self.submit_locally)
+        button_layout.addWidget(self.submit_local_btn)
+
+        self.submit_farm_btn = QtWidgets.QPushButton("Submit to Farm")
+
+        self.submit_farm_btn.clicked.connect(self.submit_to_farm)
+        button_layout.addWidget(self.submit_farm_btn)
+
+        button_layout.addStretch()
+
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+
+        layout.addLayout(button_layout)
 
     def populate_view_table(self):
         """Populate the table with current script views"""
@@ -543,27 +561,56 @@ class Render_submission_dialog(QtWidgets.QDialog):
 
         return apply_settings_to_nodes(data, self.kroger_node, debug)
 
-    def accept(self):
-        """Override accept to validate and confirm before closing"""
+    # Removed old accept() method - now using specific submit_locally() and submit_to_farm() methods
+
+    def submit_locally(self):
+        """Handle submit local button click"""
         if self.validate_data():
-            # Get the data to check how many renders will be submitted
             data = self.get_selected_data()
             num_renders = len(data["selected_views"])
 
             # Show confirmation dialog
             reply = QtWidgets.QMessageBox.question(
                 self,
-                "Confirm Submission",
-                f"About to submit {num_renders} render{'s' if num_renders != 1 else ''}, continue?",
+                "Confirm Local Render",
+                f"About to render {num_renders} render{'s' if num_renders != 1 else ''} locally, continue?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,  # Default to No for safety
+                QtWidgets.QMessageBox.No,
             )
 
             if reply == QtWidgets.QMessageBox.Yes:
+                self.submission_type = "local"
                 self.apply_settings()
-                super().accept()
+                submit_renders_local(data, self.kroger_node)
+                print("Local render data:", data)
+                self.accept()
 
-            # If No, do nothing and keep dialog open
+    def submit_to_farm(self):
+        """Handle submit to farm button click"""
+        if self.validate_data():
+            data = self.get_selected_data()
+            num_renders = len(data["selected_views"])
+
+            # Show confirmation dialog
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Confirm Farm Submission",
+                f"About to submit {num_renders} render{'s' if num_renders != 1 else ''} to farm, continue?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.submission_type = "farm"
+                self.apply_settings()
+                import quick_write
+
+                sub_write_node_generator = quick_write._quick_write_node
+                submit_renders(
+                    data, self.kroger_node, sub_write_node_generator
+                )
+                print("Farm submission data:", data)
+                self.accept()
 
 
 class Generate_review_frame_dialog(QtWidgets.QDialog):
@@ -609,7 +656,9 @@ class Generate_review_frame_dialog(QtWidgets.QDialog):
         # File Format
         self.file_format_combo = QtWidgets.QComboBox()
         self.file_format_combo.addItems(self.get_file_format_options())
-        self.file_format_combo.setCurrentText(APPROVAL_FRAME_DEFAULT_FILE_FORMAT)
+        self.file_format_combo.setCurrentText(
+            APPROVAL_FRAME_DEFAULT_FILE_FORMAT
+        )
         global_layout.addRow("File Format:", self.file_format_combo)
 
         # Colorspace
@@ -732,12 +781,18 @@ class Generate_review_frame_dialog(QtWidgets.QDialog):
                 return self.get_combo_box_options(
                     interior_writes[0], "file_type"
                 )
-        return []
+        # if no groups yet exist create a sacrificial write node and return the options
+        temp_write = nuke.createNode("Write")
+        options = self.get_combo_box_options(temp_write, "file_type")
+        nuke.delete(temp_write)
+        return options
 
     def get_colorspace_options(self):
         """
         Get available colorspace options from the interior write nodes.
         """
+        color_paths = []
+
         if not self.kroger_node:
             return []
         interior_groups = [
@@ -755,13 +810,20 @@ class Generate_review_frame_dialog(QtWidgets.QDialog):
                 color_paths = self.get_combo_box_options(
                     interior_writes[0], "out_colorspace"
                 )
-                if color_paths:
-                    names = []
-                    for color in color_paths:
-                        names.append(color.split("/")[-1])
-                    return names
-                else:
-                    return []
+
+        if not color_paths:
+            temp_write = nuke.createNode("Write")
+            color_paths = self.get_combo_box_options(
+                temp_write, "out_colorspace"
+            )
+            nuke.delete(temp_write)
+
+        if color_paths:
+            names = []
+            for color in color_paths:
+                names.append(color.split("/")[-1])
+            return names
+
         return []
 
     def get_combo_box_options(self, node, knob_name):
@@ -860,11 +922,18 @@ class Generate_review_frame_dialog(QtWidgets.QDialog):
                 "Confirm Local Render",
                 f"About to render {num_renders} review frame{'s' if num_renders != 1 else ''} locally at frame {data['frame_number']}, continue?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,  # Default to No for safety
+                QtWidgets.QMessageBox.No,
             )
 
             if reply == QtWidgets.QMessageBox.Yes:
-                # TODO: Implement local render logic here
+                render_approval_frames(
+                    True,
+                    data["selected_views"],
+                    data["frame_number"],
+                    data["file_format"],
+                    data["colorspace"],
+                    self.kroger_node,
+                )
                 print("Local render data:", data)
                 self.accept()
 
@@ -880,11 +949,18 @@ class Generate_review_frame_dialog(QtWidgets.QDialog):
                 "Confirm Farm Render",
                 f"About to submit {num_renders} review frame{'s' if num_renders != 1 else ''} to farm at frame {data['frame_number']}, continue?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,  # Default to No for safety
+                QtWidgets.QMessageBox.No,
             )
 
             if reply == QtWidgets.QMessageBox.Yes:
-                # TODO: Implement farm render logic here
+                render_approval_frames(
+                    False,
+                    data["selected_views"],
+                    data["frame_number"],
+                    data["file_format"],
+                    data["colorspace"],
+                    self.kroger_node,
+                )
                 print("Farm render data:", data)
                 self.accept()
 
@@ -939,6 +1015,22 @@ class Batch_publish_dialog(QtWidgets.QDialog):
 
         table_layout.addWidget(self.view_table)
         layout.addWidget(table_group)
+
+        # Settings section
+        settings_group = QtWidgets.QGroupBox("Publish Settings")
+        settings_layout = QtWidgets.QFormLayout(settings_group)
+
+        # Pool dropdown
+        self.pool_combo = QtWidgets.QComboBox()
+        self.populate_pool_dropdown()
+        settings_layout.addRow("Pool:", self.pool_combo)
+
+        # Group dropdown
+        self.group_combo = QtWidgets.QComboBox()
+        self.populate_group_dropdown()
+        settings_layout.addRow("Group:", self.group_combo)
+
+        layout.addWidget(settings_group)
 
         warning_label = QtWidgets.QLabel(
             "Warning: Submitting a large number of publishes can take several minutes"
@@ -1043,6 +1135,74 @@ class Batch_publish_dialog(QtWidgets.QDialog):
             if checkbox and checkbox.isChecked():
                 selected_views.append(view_name)
         return selected_views
+
+    def populate_pool_dropdown(self):
+        """Populate the pool dropdown with available pools from Deadline"""
+        try:
+            import hornet_deadline_utils
+
+            pools = hornet_deadline_utils.get_deadline_pools()
+
+            # Clear existing items
+            self.pool_combo.clear()
+
+            if pools:
+                self.pool_combo.addItems(pools)
+                # Set default to first pool or "local" if available
+                if "local" in pools:
+                    self.pool_combo.setCurrentText("local")
+                else:
+                    self.pool_combo.setCurrentIndex(0)
+            else:
+                # Fallback if no pools are available
+                self.pool_combo.addItem("local")
+                print(
+                    "Warning: Could not retrieve pools from Deadline, using 'local' as default"
+                )
+
+        except Exception as e:
+            print(f"Error populating pool dropdown: {e}")
+            # Fallback
+            self.pool_combo.clear()
+            self.pool_combo.addItem("local")
+
+    def populate_group_dropdown(self):
+        """Populate the group dropdown with available groups from Deadline"""
+        try:
+            import hornet_deadline_utils
+
+            groups = hornet_deadline_utils.get_deadline_groups()
+
+            # Clear existing items
+            self.group_combo.clear()
+
+            if groups:
+                self.group_combo.addItems(groups)
+                # Set default to first group or "nuke" if available
+                if "nuke" in groups:
+                    self.group_combo.setCurrentText("nuke")
+                else:
+                    self.group_combo.setCurrentIndex(0)
+            else:
+                # Fallback if no groups are available
+                self.group_combo.addItem("nuke")
+                print(
+                    "Warning: Could not retrieve groups from Deadline, using 'nuke' as default"
+                )
+
+        except Exception as e:
+            print(f"Error populating group dropdown: {e}")
+            # Fallback
+            self.group_combo.clear()
+            self.group_combo.addItem("nuke")
+
+    def get_selected_pool(self):
+        """Get the selected pool value"""
+        return self.pool_combo.currentText()
+
+    def get_selected_group(self):
+        """Get the selected group value"""
+        return self.group_combo.currentText()
 
     def validate_data(self):
         """Validate that at least one view is selected"""
@@ -1255,7 +1415,14 @@ def submit_button_callback():
 
         save_data_to_node(data, views_write_node)
 
-        submit_renders(data, views_write_node, sub_write_node_generator)
+        # Check submission type to avoid double submission
+        if dialog.submission_type == "local":
+            print("Local submission already handled by dialog")
+        elif dialog.submission_type == "farm":
+            print("Farm submission already handled by dialog")
+        else:
+            # Fallback for any other case (shouldn't happen)
+            print("No submission type set, this shouldn't happen")
 
     else:
         print("Dialog cancelled")
@@ -1274,10 +1441,19 @@ def batch_publish_button_callback():
 
     if dialog.exec_() == QtWidgets.QDialog.Accepted:
         selected_views = dialog.get_selected_views()
+        selected_pool = dialog.get_selected_pool()
+        selected_group = dialog.get_selected_group()
+
         print(f"Batch publishing selected views: {selected_views}")
+        print(f"Using pool: {selected_pool}, group: {selected_group}")
         print(kroger_node.name())
 
-        batch_publish(selected_views=selected_views, kroger_node=kroger_node)
+        batch_publish(
+            selected_views=selected_views,
+            kroger_node=kroger_node,
+            pool=selected_pool,
+            group=selected_group,
+        )
     else:
         print("Batch publish dialog cancelled")
 
@@ -1296,6 +1472,54 @@ def generate_review_frame_button_callback():
         # TODO: Implement actual review frame generation logic here
     else:
         print("Generate review frame dialog cancelled")
+
+
+def views_write_to_reads_button_callback():
+    """Callback function for the views write to reads button"""
+    node = nuke.thisNode()
+    with nuke.thisNode().parent():
+        views_write_to_reads(node)
+
+
+def views_write_read_from_publish_button_callback():
+    """Callback function for the views write read from publish button"""
+    views_write_read_from_publish(nuke.thisNode())
+
+
+def pregenerate_writes_button_callback():
+    """Callback function for the pregenerate writes button"""
+    views_write_node = nuke.thisNode()
+
+    # Get current views from the script
+    current_views = nuke.views()
+
+    if not current_views:
+        nuke.message("No views found in the current script.")
+        return
+
+    # Get aspect from the views write node
+    aspect = views_write_node["aspect"].getValue()
+
+    # Import the sub_write_node_generator
+    import quick_write
+
+    sub_write_node_generator = quick_write._quick_write_node
+
+    try:
+        # Call the sync function to pregenerate writes for all current views
+        _sync_sub_writes_with_views_list(
+            current_views, aspect, sub_write_node_generator, views_write_node
+        )
+
+        # Show success message
+        nuke.message(
+            f"Successfully pregenerated write nodes for {len(current_views)} view(s):\n"
+            + "\n".join(f"• {view}" for view in current_views)
+        )
+
+    except Exception as e:
+        nuke.message(f"Error pregenerating writes: {str(e)}")
+        print(f"Error in pregenerate_writes_button_callback: {str(e)}")
 
 
 def test_generate_review_frame_dialog():
@@ -1337,7 +1561,7 @@ def submit_renders(data, viewsWrite, sub_write_node_generator):
         _sync_sub_writes_with_views_list(
             selected_views, aspect, sub_write_node_generator, viewsWrite
         )
-        sub_writes = _get_all_subwrite_nodes(viewsWrite)
+        sub_writes = _get_subwrite_nodes(viewsWrite)
         print(f"sub writes: {sub_writes}")
 
         view_to_node = {}
@@ -1400,6 +1624,102 @@ def submit_renders(data, viewsWrite, sub_write_node_generator):
     print(f"Submission complete: {succeeded} succeeded, {failed} failed")
 
 
+def submit_renders_local(data, viewsWrite, sub_write_node_generator=None):
+    """Submit the selected renders locally"""
+    print("submitting renders locally with data:")
+
+    if sub_write_node_generator is None:
+        import quick_write
+
+        sub_write_node_generator = quick_write._quick_write_node
+
+    print(f"submitting renders locally with data: {data}")
+
+    print("viewsWrite node found:", viewsWrite.name())
+    selected_views = data["selected_views"]
+
+    if not selected_views:
+        nuke.message("No views selected for rendering!")
+        return
+
+    succeeded = 0
+    failed = 0
+    aspect = viewsWrite["aspect"].getValue()
+
+    with viewsWrite:
+        _sync_sub_writes_with_views_list(
+            selected_views, aspect, sub_write_node_generator, viewsWrite
+        )
+        sub_writes = _get_subwrite_nodes(viewsWrite)
+        print(f"sub writes: {sub_writes}")
+
+        view_to_node = {}
+        for node in sub_writes:
+            print(node.name())
+            view_name_knob = node.knob("view_name_knob")
+            if view_name_knob:
+                view_name = view_name_knob.getValue()
+                view_to_node[view_name] = node
+            else:
+                print(f"node {node.name()} has no view_name_knob")
+
+        print("View to node mapping:")
+        print(view_to_node)
+
+    # Apply settings before rendering
+    print("Applying settings before local rendering...")
+    apply_settings_to_nodes(data, viewsWrite, debug=False)
+
+    # Now render locally
+    for view_name in selected_views:
+        if view_name not in view_to_node:
+            print(
+                f"Warning: No node found for view '{view_name}', skipping..."
+            )
+            failed += 1
+            continue
+
+        node = view_to_node[view_name]
+        print(node.fullName())
+        try:
+            # Get frame range for this view
+            view_data = data["view_data"][view_name]
+            frame_range = view_data["frame_range"]
+
+            # Parse frame range
+            if "-" in frame_range:
+                start_frame, end_frame = frame_range.split("-", 1)
+                start_frame = int(start_frame.strip())
+                end_frame = int(end_frame.strip())
+            else:
+                # Single frame
+                start_frame = end_frame = int(frame_range.strip())
+
+            # Execute the render locally
+            nuke.execute(node, start_frame, end_frame)
+            succeeded += 1
+            print(f"Successfully rendered locally: {view_name}")
+
+        except Exception as e:
+            print(f"Failed to render view '{view_name}' locally: {str(e)}")
+            failed += 1
+
+    # Show results
+    if succeeded > 0:
+        if failed > 0:
+            nuke.message(
+                f"Rendered {succeeded} render{'s' if succeeded != 1 else ''} locally.\n{failed} render{'s' if failed != 1 else ''} failed."
+            )
+        else:
+            nuke.message(
+                f"Successfully rendered {succeeded} render{'s' if succeeded != 1 else ''} locally!"
+            )
+    else:
+        nuke.message("No renders were completed successfully.")
+
+    print(f"Local rendering complete: {succeeded} succeeded, {failed} failed")
+
+
 def update_views_list(viewsWrite=None):
     """Update the views list in the views write node"""
     if viewsWrite is None:
@@ -1448,9 +1768,7 @@ def _sync_sub_writes_with_views_list(
 
     print(f"viewsWrite: {viewsWrite.name()}")
 
-    existing_subwrite_node_views = _get_existing_subwrite_node_views(
-        viewsWrite
-    )
+    existing_subwrite_node_views = _get_subwrite_node_views(viewsWrite)
     print(f"existing subwrite node views: {existing_subwrite_node_views}")
     # print(f"existing subwrite node views: {existing_subwrite_node_views}")
 
@@ -1460,7 +1778,7 @@ def _sync_sub_writes_with_views_list(
                 _delete_subwrite_node(wn, viewsWrite)
 
     for view in views:
-        if view not in _get_existing_subwrite_node_views(viewsWrite):
+        if view not in _get_subwrite_node_views(viewsWrite):
             _add_subwrite_node(
                 view, sub_write_node_generator, aspect, viewsWrite
             )
@@ -1477,14 +1795,14 @@ def _get_subwrite_by_view(view_name, viewsWrite=None):
         )
 
     found = []
-    for wn in _get_all_subwrite_nodes(viewsWrite):
+    for wn in _get_subwrite_nodes(viewsWrite):
         if wn.knob("view_name_knob").getValue() == view_name:
             found.append(wn)
 
     return found
 
 
-def _get_existing_subwrite_node_views(viewsWrite=None):
+def _get_subwrite_node_views(viewsWrite=None):
     """Get a list of the exisiting subwrite nodes as a list of view names"""
     if viewsWrite is None:
         viewsWrite = nuke.thisNode()
@@ -1496,11 +1814,11 @@ def _get_existing_subwrite_node_views(viewsWrite=None):
 
     return [
         node.knob("view_name_knob").getValue()
-        for node in _get_all_subwrite_nodes(viewsWrite)
+        for node in _get_subwrite_nodes(viewsWrite)
     ] or []
 
 
-def _get_all_subwrite_nodes(viewsWrite=None):
+def _get_subwrite_nodes(viewsWrite=None):
     """Get a list of all the subwrite nodes"""
     if viewsWrite is None:
         viewsWrite = nuke.thisNode()
@@ -1594,6 +1912,16 @@ def _delete_subwrite_node(subwrite_node, viewsWrite=None):
         nuke.delete(subwrite_node)
 
 
+# def _get_input_node(viewsWrite=None):
+#     if viewsWrite is None:
+#         viewsWrite = nuke.thisNode()
+
+#     if viewsWrite.Class() != "Group":
+#         raise ValueError(f"viewsWrite is not a Group node: {viewsWrite.Class()}")
+
+#     with viewsWrite:
+#         return nuke.allNodes("Input")[0]
+
 # def create_write_nodes_for_views(viewsWrite, sub_write_node_generator):
 #     """Create generated nodes for all current views"""
 #     with viewsWrite:
@@ -1668,6 +1996,7 @@ def views_write_node(sub_write_node_generator=None):
     #     sub_write_node_generator = quick_write._quick_write_node
 
     viewsWrite = nuke.createNode("Group")
+    viewsWrite["tile_color"].setValue(16728063)
 
     # Use Nuke's built-in unique naming - this automatically appends numbers if name exists
     viewsWrite.setName("views_write")
@@ -1680,9 +2009,17 @@ def views_write_node(sub_write_node_generator=None):
     divider1 = nuke.Text_Knob("divider1", "")
     viewsWrite.addKnob(divider1)
 
-    regenerate_knob = nuke.PyScript_Knob("refresh_list", "refresh nodes")
+    regenerate_knob = nuke.PyScript_Knob("refresh_list", "Refresh Views")
     regenerate_knob.setValue("views_write.update_views_list()")
     viewsWrite.addKnob(regenerate_knob)
+
+    pregenerate_knob = nuke.PyScript_Knob(
+        "pregenerate_writes", "Pregenerate Writes"
+    )
+    pregenerate_knob.setValue(
+        "views_write.pregenerate_writes_button_callback()"
+    )
+    viewsWrite.addKnob(pregenerate_knob)
 
     views_list_knob = nuke.Multiline_Eval_String_Knob("views_list", "Views")
     views_list_knob.setFlag(nuke.READ_ONLY)
@@ -1691,9 +2028,7 @@ def views_write_node(sub_write_node_generator=None):
     divider_submit = nuke.Text_Knob("divider_submit", "")
     viewsWrite.addKnob(divider_submit)
 
-    button_knob = nuke.PyScript_Knob(
-        "render_dialog_button", "Configure and Submit"
-    )
+    button_knob = nuke.PyScript_Knob("render_dialog_button", "Submit")
     button_knob.setValue("views_write.submit_button_callback()")
     viewsWrite.addKnob(button_knob)
 
@@ -1713,6 +2048,26 @@ def views_write_node(sub_write_node_generator=None):
 
     divider2 = nuke.Text_Knob("divider2", "")
     viewsWrite.addKnob(divider2)
+
+    # Add buttons for views_write_to_reads and views_write_read_from_publish
+    views_write_to_reads_knob = nuke.PyScript_Knob(
+        "views_write_to_reads_button", "Render to Read"
+    )
+    views_write_to_reads_knob.setValue(
+        "views_write.views_write_to_reads_button_callback()"
+    )
+    viewsWrite.addKnob(views_write_to_reads_knob)
+
+    views_write_read_from_publish_knob = nuke.PyScript_Knob(
+        "views_write_read_from_publish_button", "Publish to Read"
+    )
+    views_write_read_from_publish_knob.setValue(
+        "views_write.views_write_read_from_publish_button_callback()"
+    )
+    viewsWrite.addKnob(views_write_read_from_publish_knob)
+
+    divider3 = nuke.Text_Knob("divider3", "")
+    viewsWrite.addKnob(divider3)
 
     data_knob = nuke.String_Knob("dialog_data", "Dialog Data")
     data_knob.setVisible(False)
@@ -1752,6 +2107,8 @@ def batch_publish(
     burnin=True,
     silent=True,
     kroger_node=None,
+    pool="local",
+    group="nuke",
 ):
     try:
         import hornet_publish_utils  # noqa: F401
@@ -1831,6 +2188,27 @@ def batch_publish(
             f"   Parameters: review={review}, review_farm={review_farm}, integrate_farm={integrate_farm}"
         )
         print(f"   Parameters: burnin={burnin}, silent={silent}")
+        print(f"   Parameters: pool={pool}, group={group}")
+
+        # Apply pool and group settings to all publish nodes before publishing
+        for node in publis_nodes:
+            try:
+                # Apply pool setting if the node has a deadlinePool knob
+                pool_knob = node.knob("deadlinePool")
+                if pool_knob:
+                    pool_knob.setValue(pool)
+                    print(f"  Set pool to '{pool}' for node: {node.name()}")
+
+                # Apply group setting if the node has a deadlineGroup knob
+                group_knob = node.knob("deadlineGroup")
+                if group_knob:
+                    group_knob.setValue(group)
+                    print(f"  Set group to '{group}' for node: {node.name()}")
+
+            except Exception as e:
+                print(
+                    f"  Warning: Could not set pool/group for node {node.name()}: {e}"
+                )
 
         hornet_publish_utils.batch_publish_write_nodes(
             publis_nodes,
@@ -1840,6 +2218,8 @@ def batch_publish(
             integrate_farm=integrate_farm,
             burnin=burnin,
             silent=silent,
+            pool=pool,
+            group=group
         )
 
         print("[OK] Batch publish completed successfully")
@@ -1854,3 +2234,149 @@ def batch_publish(
         traceback.print_exc()
         nuke.message(error_msg)
         return
+
+
+def render_approval_frames(
+    local, views, frame, format, colorspace, viewsWrite=None
+):
+    if viewsWrite is None:
+        views_write = nuke.thisNode()
+    writes = generate_review_frame_write_nodes(
+        views, frame, format, colorspace, viewsWrite
+    )
+
+    deadline_batch = (
+        f"{pathlib.Path(nuke.root().name()).stem}__approval_frames"
+    )
+
+    for write in writes:
+        if local:
+            nuke.execute(write, frame, frame)
+        else:
+            hornet_deadline_utils.vanilla_submit(
+                write, f"{frame}", batch=deadline_batch, silent=True
+            )
+
+    for write in writes:
+        nuke.delete(write)
+
+
+def generate_review_frame_write_nodes(
+    views, frame, format, colorspace, viewsWrite=None
+):
+    if viewsWrite is None:
+        views_write = nuke.thisNode()
+
+    if viewsWrite.Class() != "Group":
+        raise ValueError(
+            f"viewsWrite is not a Group node: {viewsWrite.Class()}"
+        )
+
+    # input_node = _get_input_node(viewsWrite)
+    publish_root = get_publish_root()
+
+    with viewsWrite:
+        input_node = nuke.allNodes("Input")[0]
+
+        writes = []
+        for view in views:
+            writes.append(
+                generate_review_frame_write_node(
+                    view, frame, format, colorspace, publish_root
+                )
+            )
+
+        for write in writes:
+            print(
+                f"Setting input node for {write.name()} to {input_node.name()}"
+            )
+            write.setInput(0, input_node)
+
+    return writes
+
+
+def generate_review_frame_write_node(view, frame, format, colorspace, root):
+    version = get_version_from_path(nuke.root().name())
+    file_path = (
+        pathlib.Path(root)
+        / "approval_frames"
+        / version
+        / f"{view}_v{version}.{frame}.{format}"
+    )
+
+    # write = nuke.createNode("Write")
+    write = nuke.nodes.Write()
+    write["file"].setValue(file_path.as_posix())
+    write["file_type"].setValue(format)
+    write["colorspace"].setValue(colorspace)
+    write["views"].setValue(view)
+    write["first"].setValue(frame)
+    write["last"].setValue(frame)
+    write["create_directories"].setValue(True)
+    return write
+
+
+def get_publish_root():
+    """Get the base publish root directory"""
+
+    # Get current context
+    host = registered_host()
+    context = host.get_current_context()
+
+    # Initialize anatomy
+    anatomy = Anatomy()
+
+    # Get available root keys
+    available_roots = anatomy.root_names()
+
+    # Try to get publish root, fallback to work root
+    if available_roots and "publish" in available_roots:
+        publish_root = anatomy.roots["publish"].value.rstrip("/")
+    else:
+        # Use work root as base and build publish path
+        work_root = anatomy.roots["work"].value.rstrip("/")
+        project_name = context["project_name"]
+        folder_path = context["folder_path"]
+        publish_root = f"{work_root}/{project_name}/{folder_path}/publish"
+
+    if pathlib.Path(publish_root).exists():
+        return publish_root
+    else:
+        raise ValueError(
+            f"Failed to resolve valid publish root: {publish_root}"
+        )
+
+
+import read_node_utils
+
+
+def views_write_to_reads(node):
+    context = nuke.thisNode()
+    xypos = [node.xpos(), node.ypos() + 100]
+
+    with node:
+        nodes = [n for n in nuke.allNodes() if "readfrom" in n.knobs().keys()]
+        if len(nodes) == 0:
+            print(
+                "no internal write nodes have been created yet. have you rendered?"
+            )
+            return
+        for write_group in nodes:
+            read_node_utils.write_to_read(
+                write_group, context=context, xypos=xypos
+            )
+            xypos[0] += 100
+
+
+def views_write_read_from_publish(node):
+    xypos = [node.xpos(), node.ypos() + 100]
+    with node:
+        nodes = [n for n in nuke.allNodes() if "readfrom" in n.knobs().keys()]
+        if len(nodes) == 0:
+            print(
+                "no internal write nodes have been created yet. have you rendered?"
+            )
+            return
+        for write_group in nodes:
+            read_node_utils.read_from_publish(write_group, xypos=xypos)
+            xypos[0] += 100

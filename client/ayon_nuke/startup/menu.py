@@ -199,6 +199,11 @@ def switchExtension():
 
     nde = nuke.thisNode()
     knb = nuke.thisKnob()
+    
+    if nde is None or knb is None:
+        print("warning: nde or knb is None")
+        return
+
     if knb == nde.knob("file_type"):
         filek = nde.knob("file")
         old = filek.value()
@@ -294,6 +299,9 @@ nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
 nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
+
+
+nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
 
 ### View Manager
 

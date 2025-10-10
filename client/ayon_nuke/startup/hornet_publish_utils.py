@@ -14,8 +14,9 @@ def quick_publish(
     integrate_farm=False,
     burnin=True,
     silent=False,
-    # pool="local",
-    # group="nuke",
+    pool = None,
+    group = None,
+
 ):
     """
     Submit a publish without using the ayon publish dialogue
@@ -123,22 +124,30 @@ def quick_publish(
         target_instance.data["farm"] = integrate_farm
         log.info(f"Set farm flag to: {integrate_farm}")
 
-        # Inherit deadline pool and group settings from the write node
+
         # Initialize publish_attributes if it doesn't exist
         if "publish_attributes" not in target_instance.data:
             target_instance.data["publish_attributes"] = {}
 
         # Read deadline settings from the write node knobs
-        deadline_pool = (
-            node.knob("deadlinePool").value()
-            if node.knob("deadlinePool")
-            else None
-        )
-        deadline_group = (
-            node.knob("deadlineGroup").value()
-            if node.knob("deadlineGroup")
-            else None
-        )
+
+        if pool:
+            deadline_pool = pool
+        else:
+            deadline_pool = (
+                node.knob("deadlinePool").value()
+                if node.knob("deadlinePool")
+                else None
+            )
+
+        if group:    
+            deadline_group = group
+        else:
+            deadline_group = (
+                node.knob("deadlineGroup").value()
+                if node.knob("deadlineGroup")
+                else None
+            )
 
         nuke.tprint(f"quick_publish deadline_pool: {deadline_pool}")
         nuke.tprint(f"quick_publish deadline_group: {deadline_group}")
@@ -645,6 +654,8 @@ def batch_publish_write_nodes(
     integrate_farm=True,
     burnin=True,
     silent=True,
+    pool=None,
+    group=None,
 ):
     """
     Publish multiple write nodes sequentially with delays to avoid memory issues
@@ -685,6 +696,8 @@ def batch_publish_write_nodes(
                 integrate_farm=integrate_farm,
                 burnin=burnin,
                 silent=silent,
+                pool=pool,
+                group=group
             )
 
             if success:

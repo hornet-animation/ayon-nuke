@@ -4,6 +4,7 @@ import getpass
 import nuke
 import sys
 import subprocess
+import requests
 from pathlib import Path
 from datetime import datetime
 
@@ -389,3 +390,203 @@ def get_deadline_url():
     deadline_server = get_deadline_server()
     deadline_url = "{}/api/jobs".format(deadline_server)
     return deadline_url
+
+
+
+
+
+
+
+def vanilla_submit(write_node, frame_range=None, *, dev=False, batch=None, silent=False):
+    """
+    Submit a vanilla write node to Deadline
+    
+    Args:
+        write_node: The Nuke write node to submit
+        frame_range: Frame range string (e.g., "1-100" or "1-100x2"). If None, uses write node's frame range
+        dev: Development mode - prints submission info without actually submitting
+        batch: Batch name for grouping submissions
+        silent: If True, doesn't show success alert
+    """
+    print("vanilla_submit - submitting vanilla write node to Deadline")
+    
+    if write_node is None:
+        raise Exception("Write node provided to vanilla_submit is None")
+    
+    if write_node.Class() != "Write":
+        raise Exception("Node provided to vanilla_submit is not a Write node")
+    
+    # Get frame range from write node if not provided
+    if frame_range is None:
+        first_frame = write_node.knob("first").value() if write_node.knob("first") else nuke.root().firstFrame()
+        last_frame = write_node.knob("last").value() if write_node.knob("last") else nuke.root().lastFrame()
+        frame_range = f"{int(first_frame)}-{int(last_frame)}"
+    
+    # Create timestamp for unique temp script
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
+    temp_script_path = "{path}/submission/{name}_{time}.nk".format(
+        path=os.environ["AYON_WORKDIR"],
+        name=os.path.splitext(os.path.basename(nuke.root().name()))[0],
+        time=timestamp,
+    )
+    
+    # Build submission request
+    body = build_vanilla_request(write_node, frame_range, temp_script_path)
+    
+    if batch is not None:
+        body["JobInfo"]["BatchName"] = batch
+    
+    if dev:
+        nuke.tprint(body)
+        print(body)
+        return
+    
+    file_path = body["PluginInfo"]["OutputFilePath"]
+    nuke.tprint(f"File path: {file_path}")
+    
+    # Save a copy of the script with the render as an artist discoverable backup
+    save_script_with_render(Path(file_path))
+    
+    # Create nuke script that render node will access
+    if not os.path.exists(os.path.join(os.environ["AYON_WORKDIR"], "submission")):
+        os.mkdir(os.path.join(os.environ["AYON_WORKDIR"], "submission"))
+    
+    print(f"temp_script_path: {temp_script_path}")
+    nuke.scriptSaveToTemp(temp_script_path)
+    
+    deadline_url = get_deadline_url()
+    
+    try:
+        import requests
+    except ImportError:
+        raise Exception("failed to import requests")
+    
+    response = requests.post(deadline_url, json=body, timeout=10)
+    
+    if not response.ok:
+        nuke.alert("Failed to submit to Deadline: {}".format(response.text))
+        raise Exception(response.text)
+    else:
+        if not silent:
+            nuke.alert("Submitted to Deadline Successfully")
+        return True
+
+
+def build_vanilla_request(write_node, frame_range, temp_script_path):
+    """Build Deadline submission request for vanilla write nodes"""
+    print("build_vanilla_request")
+    
+    # Include critical environment variables with submission
+    submissionEnvVars = [
+        "HORNET_ROOT",
+        "NUKE_PATH",
+        "OCIO",
+        "OPTICAL_FLARES_PATH",
+        "peregrinel_LICENSE",
+        "OFX_PLUGIN_PATH",
+        "RVL_SERVER",
+        "neatlab_LICENSE",
+    ]
+    environment = dict(
+        {k: os.environ[k] for k in submissionEnvVars if k in os.environ.keys()}
+    )
+    
+    # Get output file path from write node
+    output_file_path = write_node.knob("file").value()
+    if not output_file_path:
+        raise Exception("Write node has no output file path specified")
+    
+    body = {
+        "JobInfo": {
+            # Job name, as seen in Monitor
+            "Name": os.environ["AYON_PROJECT_NAME"].split("_")[0]
+            + "_"
+            + os.environ["AYON_FOLDER_PATH"]
+            + "_"
+            + write_node.fullName(),
+            # pass submitter user
+            "UserName": getpass.getuser(),
+            "Priority": 95,  # Default priority
+            "Pool": "local",  # Default pool
+            "SecondaryPool": "",
+            "Group": "nuke",  # Default group
+            "Plugin": "Nuke",
+            "Frames": frame_range,
+            "ChunkSize": 1,  # Default chunk size
+            "LimitGroups": "nuke-limit",
+            "ConcurrentTasks": 1,  # Default concurrent tasks
+        },
+        "PluginInfo": {
+            # Input
+            "SceneFile": temp_script_path.replace("\\", "/"),
+            # Output directory and filename
+            "OutputFilePath": output_file_path.replace("\\", "/"),
+            # Mandatory for Deadline
+            "Version": str(nuke.NUKE_VERSION_MAJOR)
+            + "."
+            + str(nuke.NUKE_VERSION_MINOR),
+            # Resolve relative references
+            "ProjectPath": nuke.script_directory().replace("\\", "/"),
+            # Only the specific write node is rendered
+            "WriteNode": write_node.fullName(),
+        },
+        # Mandatory for Deadline, may be empty
+        "AuxFiles": [],
+    }
+    
+    # Add environment variables
+    body["JobInfo"].update(
+        {
+            "EnvironmentKeyValue%d" % index: "{key}={value}".format(
+                key=key, value=str(environment[key])
+            )
+            for index, key in enumerate(environment)
+        }
+    )
+    
+    print(body)
+    return body
+
+
+
+def get_deadline_pools():
+    """Get list of available pools from Deadline"""
+    deadline_server = get_deadline_server()
+    pools_url = "{}/api/pools?NamesOnly=true".format(deadline_server)
+
+    
+    try:
+        response = requests.get(pools_url, timeout=10)
+        
+        if response.ok:
+            pools = response.json()
+            print(f"Available pools: {pools}")
+            return pools
+        else:
+            print(f"Couldn't get pools from deadline: {response.text}")
+            return []
+            
+    except Exception as e:
+        print(f"Error getting pools from Deadline: {e}")
+        return []
+
+
+def get_deadline_groups():
+    """Get list of available groups from Deadline"""
+    deadline_server = get_deadline_server()
+    groups_url = "{}/api/groups?NamesOnly=true".format(deadline_server)
+    
+    try:
+        response = requests.get(groups_url, timeout=10)
+        
+        if response.ok:
+            groups = response.json()    
+            print(f"Available groups: {groups}")
+            return groups
+        else:
+            print(f"Couldn't get groups from deadline: {response.text}")
+            return []
+            
+    except Exception as e:
+        print(f"Error getting groups from Deadline: {e}")
+        return []

@@ -180,6 +180,8 @@ class View(qtw.QWidget):
     def add_views(self, view_string):
         views = [v.strip() for v in view_string.split(",")]
         for view in views:
+            if view == "":
+                continue
             if view not in nuke.views():
                 nuke.addView(view)
 

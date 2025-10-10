@@ -2,18 +2,14 @@ import nuke
 import os
 from ayon_nuke import api
 import json
+import hornet_deadline_utils
 from ayon_core.lib import Logger
 from ayon_core.settings import get_current_project_settings
 
 from ayon_nuke.api.lib import (
     create_write_node,
     INSTANCE_DATA_KNOB,
-    handle_pub_version,
-    get_version_from_path,
-    is_version_file_linked,
-    incriment_pub_version,
     get_ovs_pathing,
-    get_node_data
 )
 
 try:
@@ -33,7 +29,7 @@ knobMatrix = {
     "jpeg": [],
 }
 
-universalKnobs = ["colorspace", "views","raw"]
+universalKnobs = ["colorspace", "views", "raw"]
 
 knobMatrix = {key: universalKnobs + value for key, value in knobMatrix.items()}
 presets = {
@@ -58,7 +54,11 @@ presets = {
 
 
 def quick_write_node(family="render"):
-    variant = nuke.getInput("Variant for Quick Write Node", "Main").title()
+    # return
+    variant = nuke.getInput("Variant for Quick Write Node", "Main")
+    if not variant:
+        return
+    variant = variant.title()
     _quick_write_node(variant, family, inpanel=True)
 
 
@@ -196,6 +196,7 @@ DONT_DELETE = [
 
 def embedOptions():
     nde = nuke.thisNode()
+    print(f"nde: {nde.name()}")
     knb = nuke.thisKnob()
 
     # log.info(' knob of type' + str(knb.Class()))
@@ -208,6 +209,12 @@ def embedOptions():
         ftype = knb.value()
     else:
         return
+
+    # if we don't check for this it attempts to embed the options on the views write node
+    # when the approval frames function creates vanilla write nodes within it
+    if "publish_instance" not in group.knobs().keys():
+        return
+
     if ftype not in knobMatrix.keys():
         return
     for knb in group.allKnobs():
@@ -227,7 +234,7 @@ def embedOptions():
         data = json.loads(
             group.knobs()[INSTANCE_DATA_KNOB].value().replace("JSON:::", "", 1)
         )
-        
+
         if "is_ovs" in data.keys():
             is_ovs = data["is_ovs"]
         else:
@@ -299,7 +306,9 @@ def embedOptions():
 
     renderInterval = nuke.Int_Knob("renderInterval", "Render every")
     renderInterval.setValue(1)
-    renderInterval.setTooltip("Render every N frames (1 = every frame, 2 = every other frame, etc.)")
+    renderInterval.setTooltip(
+        "Render every N frames (1 = every frame, 2 = every other frame, etc.)"
+    )
     group.addKnob(renderInterval)
 
     renderIntervalLabel = nuke.Text_Knob("renderIntervalLabel", "", "frame(s)")
@@ -309,7 +318,7 @@ def embedOptions():
     submit_to_deadline = nuke.PyScript_Knob(
         "submit",
         "Submit to Deadline",
-        "try:\n    update_ovs_write_version(nuke.thisNode())\n    if nuke.thisNode().knob('_cancelled') and nuke.thisNode()['_cancelled'].value():\n        print('Submit cancelled by user')\n    else:\n        deadlineNetworkSubmit()\nexcept Exception as e:\n    print(f'Error in submit: {e}')"
+        "try:\n    update_ovs_write_version(nuke.thisNode())\n    if nuke.thisNode().knob('_cancelled') and nuke.thisNode()['_cancelled'].value():\n        print('Submit cancelled by user')\n    else:\n        deadlineNetworkSubmit()\nexcept Exception as e:\n    print(f'Error in submit: {e}')",
     )
 
     clear_temp_outputs_button = nuke.PyScript_Knob(
@@ -339,8 +348,10 @@ def embedOptions():
     deadlinePriority = nuke.Int_Knob("deadlinePriority", "Priority")
     deadlineChunkSize = nuke.Int_Knob("deadlineChunkSize", "    Chunk Size")
     concurrentTasks = nuke.Int_Knob("concurrentTasks", "    Concurrent Tasks")
-    deadlinePool = nuke.String_Knob("deadlinePool", "Pool")
-    deadlineGroup = nuke.String_Knob("deadlineGroup", "Group")
+    # deadlinePool = nuke.String_Knob("deadlinePool", "Pool")
+    deadlinePool = nuke.Enumeration_Knob("deadlinePool", "Pool", hornet_deadline_utils.get_deadline_pools())
+    # deadlineGroup = nuke.String_Knob("deadlineGroup", "Group")
+    deadlineGroup = nuke.Enumeration_Knob("deadlineGroup", "Group", hornet_deadline_utils.get_deadline_groups())
 
     read_from_publish_button = nuke.PyScript_Knob(
         "readfrompublish",
@@ -425,8 +436,6 @@ def embedOptions():
     group.addKnob(endGroup)
 
 
-
-
 def show_quick_publish_info():
     """
     Show a simple info window with text content.
@@ -449,7 +458,6 @@ If "Transfer renders using farm" is checked, the transfer will take place remote
 
 
 def embed_experimental():
-
     """
     Creates an experimental tab with additional publish options and quick publish functionality.
     """
@@ -605,15 +613,17 @@ def check_existing_files_pattern(node):
         if not file_path:
             return True
 
-        glob_pattern = re.sub(r'#+', '*', file_path)
-        glob_pattern = re.sub(r'%\d+d', '*', glob_pattern)
+        glob_pattern = re.sub(r"#+", "*", file_path)
+        glob_pattern = re.sub(r"%\d+d", "*", glob_pattern)
 
         existing_files = glob.glob(glob_pattern)
 
         if existing_files:
             file_list = existing_files[:10]
             if len(existing_files) > 10:
-                file_list.append(f"... and {len(existing_files) - 10} more files")
+                file_list.append(
+                    f"... and {len(existing_files) - 10} more files"
+                )
 
             files_display = "\n".join([os.path.basename(f) for f in file_list])
             message = f"WARNING: Files matching the output pattern already exist:\n\n{files_display}\n\nThis render may overwrite existing files.\n\nContinue anyway?"
@@ -652,7 +662,9 @@ def get_frame_range_with_interval(node):
             return f"{start}-{end}x{interval}"
     except Exception as e:
         log.error(f"Error getting frame range: {e}")
-        return f"{int(nuke.root().firstFrame())}-{int(nuke.root().lastFrame())}"
+        return (
+            f"{int(nuke.root().firstFrame())}-{int(nuke.root().lastFrame())}"
+        )
 
 
 def update_ovs_write_version(node):
@@ -687,7 +699,9 @@ def update_ovs_write_version(node):
             )
         else:
             if data["is_ovs"] and not check_existing_files_pattern(node):
-                prompt = nuke.ask("Set render output path to latest new product version?")
+                prompt = nuke.ask(
+                    "Set render output path to latest new product version?"
+                )
                 if prompt:
                     try:
                         fpath_new = get_ovs_pathing(data)
@@ -697,7 +711,9 @@ def update_ovs_write_version(node):
                         if wnode is not None:
                             wnode["file"].setValue(fpath_new)
                             node["File output"].setValue(fpath_new)
-                            log.info(f"Updating ovs write path for {node_name}: {fpath_new}")
+                            log.info(
+                                f"Updating ovs write path for {node_name}: {fpath_new}"
+                            )
                             nuke.toNode(node_name)
                         else:
                             log.warning(
@@ -713,8 +729,9 @@ def update_ovs_write_version(node):
                         f"{node.name()} is potentially set to output to an old version, this may overwrite existing files on disk"
                     )
     else:
-        log.debug(f"{node.name()} is missing instance data knob, cannot set version")
-
+        log.debug(
+            f"{node.name()} is missing instance data knob, cannot set version"
+        )
 
 
 def get_all_ayon_write_nodes():
@@ -764,9 +781,50 @@ def quick_publish_wrapper(node):
             burnin=burnin,
         )
 
+
 def get_deadlin_pool():
     settings = get_current_project_settings()
     try:
-        return settings["deadline"]["publish"]["CollectDeadlinePools"]["primary_pool"]
+        return settings["deadline"]["publish"]["CollectDeadlinePools"][
+            "primary_pool"
+        ]
     except KeyError:
         return "local"
+
+def refresh_deadline_pools(quick_write_node):
+    pool_knob = quick_write_node.knobs().get("deadlinePool")
+    # group_knob = quick_write_node.knobs().get("deadlineGroup")
+    current_pool = pool_knob.value()
+    # current_group = group_knob.value()
+    pool_knob.setValues(hornet_deadline_utils.get_deadline_pools())
+    if current_pool in pool_knob.values():
+        pool_knob.setValue(current_pool)
+    else:
+        pool_knob.setValue(pool_knob.values()[0])
+
+def refresh_deadline_groups(quick_write_node):
+    group_knob = quick_write_node.knobs().get("deadlineGroup")
+    current_group = group_knob.value()
+    group_knob.setValues(hornet_deadline_utils.get_deadline_groups())
+    if current_group in group_knob.values():
+        group_knob.setValue(current_group)
+    else:
+        group_knob.setValue(group_knob.values()[0])
+
+
+def refresh_deadline_callback():
+    node = nuke.thisNode()
+    knob = nuke.thisKnob()
+    if knob.name() == "deadlinePool":
+        try:
+            refresh_deadline_pools(node)
+        except Exception as e:
+            log.error(f"Error refreshing deadline pools: {e}")
+    elif knob.name() == "deadlineGroup":
+        try:
+            refresh_deadline_groups(node)
+        except Exception as e:
+            log.error(f"Error refreshing deadline groups: {e}")
+
+
+
