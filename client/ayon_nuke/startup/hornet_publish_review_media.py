@@ -114,8 +114,8 @@ def hornet_review_media_submit(data, logger=None):
 
     for node_info in write_node_info:
         node_name = node_info[0]
-        first = node_info[1]
-        last = node_info[2]
+        first = data["first_frame"]
+        last = data["last_frame"]
         submission_script = resolve_submission_script(
             data,
             write_node_name=node_name,
@@ -542,9 +542,26 @@ def configure_write_node(write, data, log):
         write["mov64_fps"].setValue(data["fps"])
         log.debug(f"fps set to: {write['mov64_fps'].getValue()}")
 
-    new_path = f"{publish_loc.as_posix()}/{data['shot']}_{data['name']}_v{data['version']:0>3}_{write.name()}_{sanitized_colorspace_name}.{format}"
+    new_path = f"{publish_loc.as_posix()}/{data['shot']}_{data['name']}_v{data['version']:0>3}_\%d_{write.name()}_{sanitized_colorspace_name}.{format}"
     print(f"new path: {new_path}")
     write["file"].setValue(new_path)
+    
+    # Find upstream FrameRange node and sync Write node's frame range
+    upstream = write.input(0)
+    while upstream:
+        if upstream.Class() == "FrameRange":
+            first = int(upstream["first_frame"].getValue())
+            last = int(upstream["last_frame"].getValue())
+            write["first"].setValue(first)
+            write["last"].setValue(last)
+            log.info(f"Set {write.name()} frame range to match upstream FrameRange: {first}-{last}")
+            break
+        upstream = upstream.input(0) if upstream.inputs() > 0 else None
+    else:
+        # No FrameRange found, use data range
+        write["first"].setValue(data["first_frame"])
+        write["last"].setValue(data["last_frame"])
+        log.info(f"No upstream FrameRange, set {write.name()} to data range: {data['first_frame']}-{data['last_frame']}")
 
 
 def build_request(submission_info, temp_script_path, publish_env_vars):

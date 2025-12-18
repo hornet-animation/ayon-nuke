@@ -20,7 +20,7 @@ from view_manager import show as show_view_manager
 from quick_write import (
     embedOptions,
     presets,
-    embed_experimental,
+    embed_quick_publish,
     handle_farm_publish_logic,
     quick_publish_wrapper,
     show_quick_publish_info,
@@ -289,7 +289,7 @@ m.addCommand(
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")
 nuke.addKnobChanged(embedOptions, nodeClass="Write")
-nuke.addKnobChanged(embed_experimental, nodeClass="Write")
+nuke.addKnobChanged(embed_quick_publish, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
 nuke.addKnobChanged(handle_farm_publish_logic, nodeClass="Group")
 nuke.addKnobChanged(warnSingleFrame, nodeClass="Write")

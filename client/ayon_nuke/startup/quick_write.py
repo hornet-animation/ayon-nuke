@@ -34,22 +34,19 @@ universalKnobs = ["colorspace", "views", "raw"]
 knobMatrix = {key: universalKnobs + value for key, value in knobMatrix.items()}
 presets = {
     "exr": [
-        ("colorspace", "ACES - ACEScg"),
         ("channels", "all"),
         ("datatype", "16 bit half"),
     ],
     "png": [
-        ("colorspace", "Output - Rec.709"),
         ("channels", "rgba"),
         ("datatype", "16 bit"),
     ],
     "dpx": [
-        ("colorspace", "Output - Rec.709"),
         ("channels", "rgb"),
         ("datatype", "10 bit"),
         ("big endian", True),
     ],
-    "jpeg": [("colorspace", "Output - sRGB"), ("channels", "rgb")],
+    "jpeg": [("channels", "rgb")],
 }
 
 
@@ -387,7 +384,11 @@ def embedOptions():
     concurrent_warning = nuke.Text_Knob(
         "concurrent_warning", "", "<-- Set to 1 for heavy scripts"
     )
-
+    quick_publish_button = nuke.PyScript_Knob(
+        "quick_publish",
+        "Quick Publish",
+        "quick_publish_wrapper(nuke.thisNode())",
+    )
     deadlineChunkSize.setValue(1)
     concurrentTasks.setValue(2)
     # deadlinePool.setValue("local")
@@ -421,7 +422,7 @@ def embedOptions():
     group.addKnob(deadlineGroup)
     group.addKnob(submit_to_deadline)
     group.addKnob(div)
-    group.addKnob(publish_button)
+    group.addKnob(quick_publish_button)
     group.addKnob(read_from_publish_button)
     group.addKnob(navigate_to_publish_button)
 
@@ -463,9 +464,9 @@ If "Transfer renders using farm" is checked, the transfer will take place remote
     nuke.message(info_text)
 
 
-def embed_experimental():
+def embed_quick_publish():
     """
-    Creates an experimental tab with additional publish options and quick publish functionality.
+    Creates the Quick Publish tab with options for publishing renders and generating review media.
     """
     nde = nuke.thisNode()
     knb = nuke.thisKnob()
@@ -478,15 +479,15 @@ def embed_experimental():
     # Get the parent group node
     group = nuke.toNode(".".join(["root"] + nde.fullName().split(".")[:-1]))
 
-    # Check if experimental tab already exists
-    if "experimental" in group.knobs():
+    # Check if quick publish tab already exists
+    if "quick_publish_tab" in group.knobs():
         return
 
-    # Create the Experimental tab (simple tab, not a group)
-    experimental_tab = nuke.Tab_Knob(
-        "experimental",
-        "Quick Publish - experimental",
-        nuke.TABBEGINCLOSEDGROUP,
+    # Create the Quick Publish tab
+    quick_publish_tab = nuke.Tab_Knob(
+        "quick_publish_tab",
+        "Quick Publish - Settings",
+        nuke.TABBEGINGROUP,
     )
 
     # Check if this is a prerender node to skip review options
@@ -544,14 +545,8 @@ def embed_experimental():
         )
         burnin_checkbox.setFlag(nuke.STARTLINE)
 
-    quick_publish_button = nuke.PyScript_Knob(
-        "quick_publish",
-        "Quick Publish",
-        "quick_publish_wrapper(nuke.thisNode())",
-    )
-    quick_publish_button.setTooltip("Submit publish")
 
-    # Add the new text window button
+    # Add the info button
     show_info_button = nuke.PyScript_Knob(
         "show_info",
         "Show Info",
@@ -559,11 +554,7 @@ def embed_experimental():
     )
     show_info_button.setTooltip("Display information window")
 
-    # group.addKnob(div)
-    spacer = nuke.Text_Knob("exp_spacer", "", "")
-    group.addKnob(spacer)
-    group.addKnob(experimental_tab)
-
+    group.addKnob(quick_publish_tab)
     group.addKnob(publish_on_farm_checkbox)
 
     # Only add review related knobs for non prerender nodes
@@ -572,9 +563,6 @@ def embed_experimental():
         group.addKnob(generate_review_farm_checkbox)
         group.addKnob(burnin_checkbox)
 
-    spacer = nuke.Text_Knob("exp_spacer", "", "")
-    group.addKnob(spacer)
-    group.addKnob(quick_publish_button)
     group.addKnob(show_info_button)
 
 

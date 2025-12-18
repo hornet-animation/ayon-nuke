@@ -6167,7 +6167,7 @@ def get_ovs_pathing(data):
     directory_template = anatomy.templates["publish"]["render"]["directory"]
     root = anatomy.roots["work"].value.rstrip("/")
     project_name = context["project_name"]
-    hierarchy = pathlib.Path(context["folder_path"].lstrip("/")).parent
+    hierarchy = pathlib.PurePosixPath(context["folder_path"].lstrip("/")).parent
     shot = pathlib.Path(context["folder_path"]).name
     product = data["productType"]
     name = data["productName"]
