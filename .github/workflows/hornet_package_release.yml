@@ -1,7 +1,12 @@
 name: Build and Release Package
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Upstream version prefix (e.g. 0.3.7). Set automatically by the sync workflow; leave blank for normal releases.'
+        required: false
+        default: ''
   push:
     branches:
       - develop
@@ -32,11 +37,15 @@ jobs:
           import os
           import sys
 
+          # Upstream version passed explicitly by the sync workflow; empty on normal releases
+          upstream_version = os.environ.get('UPSTREAM_VERSION_INPUT', '').strip() or None
+          if upstream_version:
+              print(f"Upstream version from sync workflow: {upstream_version}")
+
           # Read and extract current version from package.py
           with open('package.py', 'r') as f:
               package_content = f.read()
 
-          # Use a pattern that specifically matches the version at the start of a line
           package_version_match = re.search(r'^version\s*=\s*"([^"]+)"', package_content, re.MULTILINE)
           if not package_version_match:
               print("Error: Could not find version in package.py")
@@ -47,30 +56,24 @@ jobs:
           current_version = package_version_match.group(1)
           print(f"Current version: {current_version}")
 
-          # Split at the last period to get base and suffix number
-          parts = current_version.rsplit('.', 1)
-          if len(parts) != 2:
-              print("Error: Version format not as expected")
+          # Parse our version: {upstream_base}-hornet.{N}
+          hornet_match = re.match(r'^(.+)-hornet\.(\d+)$', current_version)
+          if not hornet_match:
+              print(f"Error: Version '{current_version}' does not match expected format 'X.Y.Z-hornet.N'")
               sys.exit(1)
 
-          version_base = parts[0]
-          try:
-              suffix_number = int(parts[1])
-              new_suffix_number = suffix_number + 1
-              new_version = f"{version_base}.{new_suffix_number}"
-              print(f"New version: {new_version}")
-          except ValueError:
-              print(f"Error: Suffix '{parts[1]}' is not a number")
-              sys.exit(1)
+          our_upstream_base = hornet_match.group(1)
+          current_n = int(hornet_match.group(2))
 
-          # Update package.py - use regex with start-of-line anchor for safer replacement
-          with open('package.py', 'r') as f:
-              content = f.read()
+          # Use upstream version as prefix if available, otherwise keep ours
+          version_prefix = upstream_version if upstream_version else our_upstream_base
+          new_version = f"{version_prefix}-hornet.{current_n + 1}"
+          print(f"New version: {new_version}")
 
           updated_content = re.sub(
               r'^version\s*=\s*"[^"]+"',
               f'version = "{new_version}"',
-              content,
+              package_content,
               flags=re.MULTILINE
           )
 
@@ -121,7 +124,7 @@ jobs:
           EOL
 
           # Execute the Python script
-          python increment_version.py
+          UPSTREAM_VERSION_INPUT="${{ inputs.upstream_version }}" python increment_version.py
 
       - name: Create package
         run: |
