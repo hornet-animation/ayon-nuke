@@ -18,6 +18,7 @@ jobs:
       contents: write
       pull-requests: write
       actions: write
+      workflows: write
 
     steps:
       - name: Checkout develop
@@ -61,9 +62,26 @@ jobs:
             echo "success=true" >> "$GITHUB_OUTPUT"
             echo "Rebase succeeded."
           else
-            git rebase --abort
-            echo "success=false" >> "$GITHUB_OUTPUT"
-            echo "Rebase failed — conflicts detected."
+            # package.py and version.py always conflict because we maintain our own
+            # version scheme — auto-resolve them by keeping our commit's version.
+            # The release workflow will set the final correct version regardless.
+            # (During rebase, --theirs = our commit being replayed, not upstream.)
+            for f in package.py client/ayon_nuke/version.py; do
+              if git diff --name-only --diff-filter=U | grep -qx "$f"; then
+                echo "Auto-resolving $f (keeping our version)"
+                git checkout --theirs "$f"
+                git add "$f"
+              fi
+            done
+
+            if GIT_EDITOR=true git rebase --continue; then
+              echo "success=true" >> "$GITHUB_OUTPUT"
+              echo "Rebase succeeded after auto-resolving version file conflicts."
+            else
+              git rebase --abort
+              echo "success=false" >> "$GITHUB_OUTPUT"
+              echo "Rebase failed — conflicts detected."
+            fi
           fi
 
       - name: Push rebased develop and dispatch release
