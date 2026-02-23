@@ -18,7 +18,6 @@ jobs:
       contents: write
       pull-requests: write
       actions: write
-      workflows: write
 
     steps:
       - name: Checkout develop
@@ -122,8 +121,12 @@ jobs:
           CONFLICT_BRANCH="upstream-sync/conflict-${TIMESTAMP}"
           UPSTREAM_LOG=$(git log --oneline "$(git merge-base HEAD upstream/develop)..upstream/develop")
 
-          # Branch at upstream tip — PR diff will show exactly what's incoming
+          # Branch at upstream tip — PR diff will show exactly what's incoming.
+          # Restore our .github/workflows/ so upstream workflow files aren't pushed
+          # (GITHUB_TOKEN can't push workflow file changes without workflows permission).
           git checkout -b "$CONFLICT_BRANCH" upstream/develop
+          git checkout origin/develop -- .github/workflows/
+          git diff --cached --quiet || git commit -m "chore: restore hornet workflow files"
           git push origin "$CONFLICT_BRANCH"
 
           gh pr create \
