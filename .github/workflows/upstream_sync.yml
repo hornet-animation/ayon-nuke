@@ -122,11 +122,13 @@ jobs:
           UPSTREAM_LOG=$(git log --oneline "$(git merge-base HEAD upstream/develop)..upstream/develop")
 
           # Branch at upstream tip — PR diff will show exactly what's incoming.
-          # Restore our .github/workflows/ so upstream workflow files aren't pushed
-          # (GITHUB_TOKEN can't push workflow file changes without workflows permission).
+          # Wipe and restore .github/workflows/ from our develop so no upstream workflow
+          # files are included — GITHUB_TOKEN can't push workflow changes without
+          # workflows permission, and we don't want upstream CI files anyway.
           git checkout -b "$CONFLICT_BRANCH" upstream/develop
+          git rm -rf .github/workflows/
           git checkout origin/develop -- .github/workflows/
-          git diff --cached --quiet || git commit -m "chore: restore hornet workflow files"
+          git commit -m "chore: restore hornet workflow files"
           git push origin "$CONFLICT_BRANCH"
 
           gh pr create \
