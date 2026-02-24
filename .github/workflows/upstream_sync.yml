@@ -132,6 +132,7 @@ jobs:
           git push origin "$CONFLICT_BRANCH"
 
           gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Upstream sync conflict — manual rebase required (${TIMESTAMP})" \
             --body "$(cat <<PREOF
           ## Upstream sync failed
