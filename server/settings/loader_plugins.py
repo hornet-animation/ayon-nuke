@@ -19,6 +19,23 @@ class LoadImageModel(BaseSettingsModel):
     )
 
 
+def node_type_enum_options():
+    return [
+        {
+            "value": "auto",
+            "label": "Auto-detect"
+        },
+        {
+            "value": "Read",
+            "label": "Read"
+        },
+        {
+            "value": "DeepRead",
+            "label": "DeepRead"
+        }
+    ]
+
+
 class LoadClipOptionsModel(BaseSettingsModel):
     start_at_workfile: bool = SettingsField(
         title="Start at workfile's start frame"
@@ -26,9 +43,18 @@ class LoadClipOptionsModel(BaseSettingsModel):
     add_retime: bool = SettingsField(
         title="Add retime"
     )
-    deep_exr: bool = SettingsField(
-        title="Deep Exr Read Node"
+    node_type: str = SettingsField(
+        title="Read Node Type",
+        enum_resolver=node_type_enum_options,
+        default="auto",
     )
+
+
+class LoadBackdropNodesModel(BaseSettingsModel):
+    remove_nodes_from_backdrop: bool = SettingsField(
+        title="Remove existing AYON backdrops when removing container"
+    )
+
 
 class LoadClipModel(BaseSettingsModel):
     enabled: bool = SettingsField(
@@ -57,6 +83,10 @@ class LoaderPluginsModel(BaseSettingsModel):
         default_factory=LoadClipModel,
         title="Load Clip"
     )
+    LoadBackdropNodes: LoadBackdropNodesModel = SettingsField(
+        default_factory=LoadBackdropNodesModel,
+        title="Load Backdrop Nodes"
+    )
     GeoImportLoader: LoaderEnabledModel = SettingsField(
         default_factory=LoaderEnabledModel,
         title="Load GeoImport"
@@ -80,8 +110,11 @@ DEFAULT_LOADER_PLUGINS_SETTINGS = {
         "options_defaults": {
             "start_at_workfile": False,
             "add_retime": True,
-            "deep_exr": False
+            "node_type": "auto"
         }
+    },
+    "LoadBackdropNodes": {
+        "remove_nodes_from_backdrop": False
     },
     "GeoImportLoader": {
         "enabled": True

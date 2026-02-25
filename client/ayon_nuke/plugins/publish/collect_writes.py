@@ -1,7 +1,5 @@
 import os
-import re
 import nuke
-
 import pyblish.api
 
 from ayon_core.pipeline import publish
@@ -182,7 +180,7 @@ class CollectNukeWrites(
             render_target (str): render target
             colorspace (str): colorspace
         """
-        product_type = instance.data["productType"]
+        product_base_type = instance.data["productBaseType"]
 
         # Check if this is a single frame render - detect it here directly
         first_frame, last_frame = self._get_frame_range_data(instance)
@@ -198,25 +196,23 @@ class CollectNukeWrites(
             )
             self.log.debug(
                 "Hornet - Appending render target to families: {}.frames".format(
-                    product_type
+                    product_base_type
                 )
             )
         else:
             instance.data["families"].append(
-                "{}.{}".format(product_type, render_target)
+                "{}.{}".format(product_base_type, render_target)
             )
             self.log.debug(
                 "Appending render target to families: {}.{}".format(
-                    product_type, render_target
+                    product_base_type, render_target
                 )
             )
 
         write_node = self._write_node_helper(instance)
-        if write_node is None:
-            self.log.error(
-                "Cannot set additional instance data: write node not found"
-            )
-            return
+        if instance.data.get("stagingDir_is_custom", False):
+            self.log.info("Custom staging dir detected. Syncing write nodes output path.")
+            napi.lib.writes_version_sync(write_node, self.log)
 
         # Determine defined file type
         path = write_node["file"].value()
@@ -250,17 +246,15 @@ class CollectNukeWrites(
             }
         )
 
-        if product_type == "render":
-            instance.data.update(
-                {
-                    "handleStart": handle_start,
-                    "handleEnd": handle_end,
-                    "frameStart": first_frame + handle_start,
-                    "frameEnd": last_frame - handle_end,
-                    "frameStartHandle": first_frame,
-                    "frameEndHandle": last_frame,
-                }
-            )
+        if product_base_type == "render":
+            instance.data.update({
+                "handleStart": handle_start,
+                "handleEnd": handle_end,
+                "frameStart": first_frame + handle_start,
+                "frameEnd": last_frame - handle_end,
+                "frameStartHandle": first_frame,
+                "frameEndHandle": last_frame,
+            })
         else:
             instance.data.update(
                 {
@@ -307,7 +301,7 @@ class CollectNukeWrites(
             instance (pyblish.api.Instance): pyblish instance
 
         Returns:
-            nuke.Node: write node or None if not found
+            nuke.Node | None: write node
         """
         instance_name = instance.data["name"]
 
@@ -315,8 +309,8 @@ class CollectNukeWrites(
             # return cashed write node
             return self._write_nodes[instance_name]
 
-        # get all child nodes from group node recursively
-        child_nodes = self._get_instance_group_node_childs_recursive(instance)
+        # get all child nodes from group node
+        child_nodes = napi.get_instance_group_node_children(instance)
 
         # set child nodes to instance transient data
         instance.data["transientData"]["childNodes"] = child_nodes
@@ -373,7 +367,9 @@ class CollectNukeWrites(
 
         # set slate frame
         collected_frames = self._add_slate_frame_to_collected_frames(
-            instance, collected_frames, first_frame, last_frame
+            instance,
+            collected_frames,
+            first_frame
         )
 
         if len(collected_frames) == 1:
@@ -396,24 +392,11 @@ class CollectNukeWrites(
         # convert first frame to string with padding
         return ("{{:0{}d}}".format(len(str(last_frame)))).format(first_frame)
 
-    def _get_frame_start_index(self, collected_frames, frame_start):
-        """Get index of *frame_start* within *collected_frames*.
-
-        Args:
-            collected_frames (list): collected frames.
-            frame_start (str): initial frame of the sequence.
-
-        Returns:
-            int: index of the initial frame in **collected_frames**.
-
-        """
-        pattern = rf"\b{frame_start}\b"
-        for index, file_name in enumerate(collected_frames):
-            if re.search(pattern, file_name):
-                return index
-
     def _add_slate_frame_to_collected_frames(
-        self, instance, collected_frames, first_frame, last_frame
+        self,
+        instance,
+        collected_frames,
+        first_frame
     ):
         """Add slate frame to collected frames.
 
@@ -421,30 +404,20 @@ class CollectNukeWrites(
             instance (pyblish.api.Instance): pyblish instance
             collected_frames (list): collected frames
             first_frame (int): first frame
-            last_frame (int): last frame
 
         Returns:
             list: collected frames
         """
-        frame_start_str = self._get_frame_start_str(first_frame, last_frame)
-        frame_length = int(last_frame - first_frame + 1)
+        if "slate" not in instance.data["families"]:
+            return collected_frames
 
-        # this will only run if slate frame is not already
-        # rendered from previews publishes
-        if "slate" in instance.data["families"] and frame_length == len(
-            collected_frames
-        ):
-            frame_slate_str = self._get_frame_start_str(
-                first_frame - 1, last_frame
-            )
-            frame_start_index = self._get_frame_start_index(
-                collected_frames, frame_start_str
-            )
-            if frame_start_index is not None:
-                slate_frame = collected_frames[frame_start_index].replace(
-                    frame_start_str, frame_slate_str
-                )
-                collected_frames.insert(0, slate_frame)
+        write_node = self._write_node_helper(instance)
+        expected_slate_frame = first_frame - 1
+        expected_slate_path = write_node["file"].evaluate(expected_slate_frame)
+
+        if not os.path.exists(expected_slate_path):
+            slate_frame = os.path.basename(expected_slate_path)
+            collected_frames.insert(0, slate_frame)
 
         return collected_frames
 

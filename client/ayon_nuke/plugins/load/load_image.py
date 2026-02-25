@@ -26,7 +26,7 @@ from ayon_core.lib.transcoding import (
 class LoadImage(load.LoaderPlugin):
     """Load still image into Nuke"""
 
-    product_types = {
+    product_base_types = {
         "render2d",
         "source",
         "plate",
@@ -34,7 +34,9 @@ class LoadImage(load.LoaderPlugin):
         "prerender",
         "review",
         "image",
+        "workfile"
     }
+    product_types = product_base_types
     representations = {"*"}
     extensions = set(ext.lstrip(".") for ext in IMAGE_EXTENSIONS)
 

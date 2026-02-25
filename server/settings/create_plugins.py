@@ -69,7 +69,6 @@ class PrenodeModel(BaseSettingsModel):
             " preceding nodes if a connection is needed."
         ),
     )
-
     nodeclass: str = SettingsField(
         "",
         title="Node class",
@@ -83,7 +82,6 @@ class PrenodeModel(BaseSettingsModel):
             "come before this node."
         ),
     )
-
     knobs: list[KnobModel] = SettingsField(
         default_factory=list,
         title="Knobs",
@@ -96,7 +94,36 @@ class PrenodeModel(BaseSettingsModel):
         return value
 
 
-class CreateWriteRenderModel(BaseSettingsModel):
+class ProductTypeItemModel(BaseSettingsModel):
+    _layout = "compact"
+    product_type: str = SettingsField(
+        title="Product type",
+        description="Product type name"
+    )
+    label: str = SettingsField(
+        "",
+        title="Label",
+        description="Label to show in UI for the product type"
+    )
+
+
+class DefaultPluginModel(BaseSettingsModel):
+    enabled: bool = SettingsField(
+        True, title="Enabled", description="Enable or disable the plugin"
+    )
+    order: int = SettingsField(
+        100, title="Order", description="Order of the plugin in the list"
+    )
+    product_type_items: list[ProductTypeItemModel] = SettingsField(
+        default_factory=list,
+        title="Product type items",
+        description=(
+            "Optional list of product types this plugin can create. "
+        ),
+    )
+
+
+class CreateWriteRenderModel(DefaultPluginModel):
     temp_rendering_path_template: str = SettingsField(
         title="Temporary rendering path template"
     )
@@ -131,7 +158,7 @@ class CreateWriteRenderModel(BaseSettingsModel):
         return value
 
 
-class CreateWritePrerenderModel(BaseSettingsModel):
+class CreateWritePrerenderModel(DefaultPluginModel):
     temp_rendering_path_template: str = SettingsField(
         title="Temporary rendering path template"
     )
@@ -166,7 +193,7 @@ class CreateWritePrerenderModel(BaseSettingsModel):
         return value
 
 
-class CreateWriteImageModel(BaseSettingsModel):
+class CreateWriteImageModel(DefaultPluginModel):
     temp_rendering_path_template: str = SettingsField(
         title="Temporary rendering path template"
     )
@@ -198,23 +225,62 @@ class CreateWriteImageModel(BaseSettingsModel):
         """Ensure name fields within the lists have unique names."""
         ensure_unique_names(value)
         return value
+
+
+class CreateWorkfileModel(BaseSettingsModel):
+    is_mandatory: bool = SettingsField(
+        default=False,
+        title="Mandatory workfile",
+        description=(
+            "Workfile cannot be disabled by user in UI."
+            " Requires core addon 1.4.1 or newer."
+        )
+    )
 
 
 class CreatorPluginsSettings(BaseSettingsModel):
     CreateWriteRender: CreateWriteRenderModel = SettingsField(
-        default_factory=CreateWriteRenderModel, title="Create Write Render"
+        default_factory=CreateWriteRenderModel,
+        title="Render (write)"
     )
     CreateWritePrerender: CreateWritePrerenderModel = SettingsField(
         default_factory=CreateWritePrerenderModel,
-        title="Create Write Prerender",
+        title="Prerender (write)"
     )
     CreateWriteImage: CreateWriteImageModel = SettingsField(
-        default_factory=CreateWriteImageModel, title="Create Write Image"
+        default_factory=CreateWriteImageModel,
+        title="Image (write)"
+    )
+    CreateBackdrop: DefaultPluginModel = SettingsField(
+        default_factory=DefaultPluginModel,
+        title="Nukenodes (backdrop)"
+    )
+    CreateCamera: DefaultPluginModel = SettingsField(
+        default_factory=DefaultPluginModel,
+        title="Camera (3d)"
+    )
+    CreateGizmo: DefaultPluginModel = SettingsField(
+        default_factory=DefaultPluginModel,
+        title="Gizmo (group)"
+    )
+    CreateModel: DefaultPluginModel = SettingsField(
+        default_factory=DefaultPluginModel,
+        title="Model (3d)"
+    )
+    CreateSource: DefaultPluginModel = SettingsField(
+        default_factory=DefaultPluginModel,
+        title="Source (read)"
+    )
+    WorkfileCreator: CreateWorkfileModel = SettingsField(
+        default_factory=CreateWorkfileModel,
+        title="Create Workfile"
     )
 
 
 DEFAULT_CREATE_SETTINGS = {
     "CreateWriteRender": {
+        "enabled": True,
+        "order": 100,
         "temp_rendering_path_template": "{work}/renders/nuke/{product[name]}/{product[name]}.{frame}.{ext}",
         "default_variants": ["Main", "Mask"],
         "instance_attributes": [
@@ -243,6 +309,8 @@ DEFAULT_CREATE_SETTINGS = {
         ],
     },
     "CreateWritePrerender": {
+        "enabled": True,
+        "order": 100,
         "temp_rendering_path_template": "{work}/renders/nuke/{product[name]}/{product[name]}.{frame}.{ext}",
         "default_variants": ["Key01", "Bg01", "Fg01", "Branch01", "Part01"],
         "instance_attributes": [
@@ -256,6 +324,8 @@ DEFAULT_CREATE_SETTINGS = {
         "prenodes": [],
     },
     "CreateWriteImage": {
+        "enabled": True,
+        "order": 100,
         "temp_rendering_path_template": "{work}/renders/nuke/{product[name]}/{product[name]}.{ext}",
         "default_variants": ["StillFrame", "MPFrame", "LayoutFrame"],
         "instance_attributes": ["use_range_limit"],
@@ -274,6 +344,26 @@ DEFAULT_CREATE_SETTINGS = {
                     }
                 ],
             }
-        ],
+        ]
     },
+    "CreateBackdrop": {
+        "enabled": True,
+        "order": 100,
+    },
+    "CreateCamera": {
+        "enabled": True,
+        "order": 100,
+    },
+    "CreateGizmo": {
+        "enabled": True,
+        "order": 100,
+    },
+    "CreateModel": {
+        "enabled": True,
+        "order": 100,
+    },
+    "CreateSource": {
+        "enabled": True,
+        "order": 100,
+    }
 }

@@ -14,7 +14,7 @@ from ayon_core.lib import StringTemplate
 from ayon_core.pipeline import (
     LoaderPlugin,
     CreatorError,
-    Creator as NewCreator,
+    Creator,
     CreatedInstance,
     get_current_task_name,
     AYON_INSTANCE_ID,
@@ -30,6 +30,7 @@ from .lib import (
     INSTANCE_DATA_KNOB,
     Knobby,
     create_backdrop,
+    deprecated,
     maintained_selection,
     get_avalon_knob_data,
     set_node_knobs_from_settings,
@@ -70,7 +71,7 @@ class NukeCreatorError(CreatorError):
     pass
 
 
-class NukeCreator(NewCreator):
+class NukeCreator(Creator):
     node_class_name = None
 
     def _pass_pre_attributes_to_instance(
@@ -109,14 +110,17 @@ class NukeCreator(NewCreator):
                 # a node has no instance data
                 continue
 
+            # QUESTION what is this logic? Why product name is compared
+            #   against product type?
             # test if product name is matching
-            if node_data.get("productType") == product_name:
+            product_base_type = node_data.get("productBaseType")
+            if not product_base_type:
+                product_base_type = node_data.get("productType")
+            if product_base_type == product_name:
                 raise NukeCreatorError(
-                    (
-                        "A publish instance for '{}' already exists "
-                        "in nodes! Please change the variant "
-                        "name to ensure unique output."
-                    ).format(product_name)
+                    f"A publish instance for '{product_name}' already exists"
+                    " in nodes! Please change the variant name to ensure"
+                    " unique output."
                 )
 
     def create_instance_node(
@@ -211,6 +215,10 @@ class NukeCreator(NewCreator):
         # make sure product name is unique
         self.check_existing_product(product_name)
 
+        product_type = instance_data.get("productType")
+        if not product_type:
+            product_type = self.product_base_type
+
         try:
             instance_node = self.create_instance_node(
                 product_name,
@@ -218,7 +226,11 @@ class NukeCreator(NewCreator):
                 node_selection=node_selection,
             )
             instance = CreatedInstance(
-                self.product_type, product_name, instance_data, self
+                product_base_type=self.product_base_type,
+                product_type=product_type,
+                product_name=product_name,
+                data=instance_data,
+                creator=self,
             )
 
             self.apply_staging_dir(instance)
@@ -303,6 +315,7 @@ class NukeWriteCreator(NukeCreator):
     identifier = "create_write"
     label = "Create Write"
     product_type = "write"
+    product_base_type = "write"
     icon = "sign-out"
 
     temp_rendering_path_template = (  # default to be applied if settings is missing
@@ -494,12 +507,19 @@ class NukeWriteCreator(NukeCreator):
         # make sure selected nodes are added
         node_selection = self._get_current_selected_nodes(pre_create_data)
 
-        # make sure product name is unique
+        # make sure the product name is unique
         self.check_existing_product(product_name)
 
+        product_type = instance_data.get("productType")
+        if not product_type:
+            product_type = self.product_base_type
         try:
             instance = CreatedInstance(
-                self.product_type, product_name, instance_data, self
+                product_base_type=self.product_base_type,
+                product_type=product_type,
+                product_name=product_name,
+                data=instance_data,
+                creator=self,
             )
 
             staging_dir = self.apply_staging_dir(instance)
@@ -529,19 +549,16 @@ class NukeWriteCreator(NukeCreator):
 
     def apply_settings(self, project_settings):
         """Method called on initialization of plugin to apply settings."""
-
-        # plugin settings
+        # plugin settings for particular creator
+        super().apply_settings(project_settings)
         plugin_settings = self.get_creator_settings(project_settings)
+        # enabled
+        self.enabled: bool = plugin_settings.get("enabled", True)
+        # order
+        self.order: int = plugin_settings.get("order", 0)
         temp_rendering_path_template = (
             plugin_settings.get("temp_rendering_path_template")
             or self.temp_rendering_path_template
-        )
-        # TODO remove template key replacements
-        temp_rendering_path_template = (
-            temp_rendering_path_template.replace("{product[name]}", "{subset}")
-            .replace("{product[type]}", "{family}")
-            .replace("{task[name]}", "{task}")
-            .replace("{folder[name]}", "{asset}")
         )
         # individual attributes
         self.instance_attributes = (
@@ -558,28 +575,28 @@ class NukeWriteCreator(NukeCreator):
         self.temp_rendering_path_template = temp_rendering_path_template
 
 
-def get_instance_group_node_childs(instance):
-    """Return list of instance group node children
+def get_instance_group_node_children(instance):
+    """Return list of instance group node children.
 
     Args:
         instance (pyblish.Instance): pyblish instance
 
     Returns:
-        list: [nuke.Node]
+        list[nuke.Node]: list of children nodes
+
     """
     node = instance.data["transientData"]["node"]
 
-    if node.Class() != "Group":
-        return
+    if not isinstance(node, nuke.Group):
+        return []
 
-    # collect child nodes
-    child_nodes = []
-    # iterate all nodes
-    for node in nuke.allNodes(group=node):
-        # add contained nodes to instance's node list
-        child_nodes.append(node)
+    return node.nodes()
 
-    return child_nodes
+
+# alias for backwards compatibility
+@deprecated("ayon_nuke.api.plugin.get_instance_group_node_children")
+def get_instance_group_node_childs(instance):
+    return get_instance_group_node_children(instance)
 
 
 def get_colorspace_from_node(node):
@@ -1309,23 +1326,6 @@ class ExporterReviewMov(ExporterReview):
             product_name, r_node, "Read...   `{}`"
         )
 
-        # add reformat node
-        reformat_nodes_config = kwargs["reformat_nodes_config"]
-        if reformat_nodes_config["enabled"]:
-            reposition_nodes = reformat_nodes_config["reposition_nodes"]
-            for reposition_node in reposition_nodes:
-                node_class = reposition_node["node_class"]
-                knobs = reposition_node["knobs"]
-                node = nuke.createNode(node_class)
-                set_node_knobs_from_settings(node, knobs)
-
-                # connect in order
-                self._connect_to_above_nodes(
-                    node, product_name, "Reposition node...   `{}`"
-                )
-            # append reformatted tag
-            add_tags.append("reformatted")
-
         # only create colorspace baking if toggled on
         if bake_viewer_process:
             if bake_viewer_input_process_node:
@@ -1399,6 +1399,23 @@ class ExporterReviewMov(ExporterReview):
                     )
 
                 self._connect_to_above_nodes(node, product_name, message)
+
+        # add reformat node
+        reformat_nodes_config = kwargs["reformat_nodes_config"]
+        if reformat_nodes_config["enabled"]:
+            reposition_nodes = reformat_nodes_config["reposition_nodes"]
+            for reposition_node in reposition_nodes:
+                node_class = reposition_node["node_class"]
+                knobs = reposition_node["knobs"]
+                node = nuke.createNode(node_class)
+                set_node_knobs_from_settings(node, knobs)
+
+                # connect in order
+                self._connect_to_above_nodes(
+                    node, product_name, "Reposition node...   `{}`"
+                )
+            # append reformatted tag
+            add_tags.append("reformatted")
 
         # Write node
         write_node = nuke.createNode("Write")
@@ -1497,8 +1514,7 @@ def convert_to_valid_instaces():
 
     Also save as new minor version of workfile.
     """
-
-    def product_type_to_identifier(product_type):
+    def product_base_type_to_identifier(product_base_type):
         mapping = {
             "render": "create_write_render",
             "prerender": "create_write_prerender",
@@ -1507,9 +1523,9 @@ def convert_to_valid_instaces():
             "camera": "create_camera",
             "nukenodes": "create_backdrop",
             "gizmo": "create_gizmo",
-            "source": "create_source",
+            "source": "create_source"
         }
-        return mapping[product_type]
+        return mapping[product_base_type]
 
     from ayon_nuke.api import workio
 
@@ -1567,9 +1583,11 @@ def convert_to_valid_instaces():
 
         transfer_data["task"] = task_name
 
-        product_type = avalon_knob_data.get("productType")
-        if product_type is None:
-            product_type = avalon_knob_data["family"]
+        product_base_type = (
+            avalon_knob_data.get("productBaseType")
+            or avalon_knob_data.get("productType")
+            or avalon_knob_data.get("family")
+        )
 
         # establish families
         families_ak = avalon_knob_data.get("families", [])
@@ -1585,8 +1603,8 @@ def convert_to_valid_instaces():
             transfer_data["active"] = node["publish"].value()
 
         # add identifier
-        transfer_data["creator_identifier"] = product_type_to_identifier(
-            product_type
+        transfer_data["creator_identifier"] = product_base_type_to_identifier(
+            product_base_type
         )
 
         # Add all nodes in group instances.

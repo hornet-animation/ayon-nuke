@@ -3518,7 +3518,7 @@ def set_avalon_knob_data(node, data=None, prefix="avalon:"):
     Examples:
         data = {
             'folderPath': 'sq020sh0280',
-            'productType': 'render',
+            'productBaseType': 'render',
             'productName': 'productMain'
         }
     """
@@ -3744,6 +3744,48 @@ def get_nuke_imageio_settings():
     return get_project_settings(Context.project_name)["nuke"]["imageio"]
 
 
+def get_matching_override_node(node_class, plugin_name, product_name):
+    """Find matching override node for the given configuration.
+
+    Args:
+        node_class (str): Nuke node class name
+        plugin_name (str): Plugin name
+        product_name (str): Product name
+
+    Returns:
+        dict or None: Matching override node or None if not found
+    """
+    imageio_nodes = get_nuke_imageio_settings()["nodes"]
+    override_nodes = imageio_nodes["override_nodes"]
+
+    for override_node in override_nodes:
+        node_class_preset = override_node["nuke_node_class"]
+
+        if override_node.get("custom_class"):
+            node_class_preset = override_node["custom_class"]
+
+        if node_class not in node_class_preset:
+            continue
+
+        if plugin_name not in override_node["plugins"]:
+            continue
+
+        product_names = override_node["product_names"]
+
+        if (
+            product_names
+            and not any(
+                re.search(s.lower(), product_name.lower())
+                for s in product_names
+            )
+        ):
+            continue
+
+        return override_node
+
+    return None
+
+
 def get_imageio_node_setting(node_class, plugin_name, product_name):
     ''' Get preset data for dataflow (fileType, compression, bitDepth)
     '''
@@ -3765,13 +3807,24 @@ def get_imageio_node_setting(node_class, plugin_name, product_name):
     if not imageio_node:
         return
 
-    # find overrides and update knobs with them
-    get_imageio_node_override_setting(
-        node_class,
-        plugin_name,
-        product_name,
-        imageio_node["knobs"]
+    # Check if a node override exists for this configuration
+    override_imageio_node = get_matching_override_node(
+        node_class, plugin_name, product_name
     )
+
+    # If node override exists,
+    # use only override knobs
+    # (don't merge with original master knobs)
+    if override_imageio_node:
+        imageio_node["knobs"] = override_imageio_node.get("knobs", [])
+    else:
+        # Otherwise apply partial overrides to original master knobs
+        imageio_node["knobs"] = get_imageio_node_override_setting(
+            node_class,
+            plugin_name,
+            product_name,
+            imageio_node["knobs"]
+        )
     return imageio_node
 
 
@@ -3780,37 +3833,10 @@ def get_imageio_node_override_setting(
 ):
     ''' Get imageio node overrides from settings
     '''
-    imageio_nodes = get_nuke_imageio_settings()["nodes"]
-    override_nodes = imageio_nodes["override_nodes"]
-
     # find matching override node
-    override_imageio_node = None
-    for onode in override_nodes:
-
-        node_class_preset = onode["nuke_node_class"]
-
-        if onode.get("custom_class"):
-            node_class_preset = onode["custom_class"]
-
-        if node_class not in node_class_preset:
-            continue
-
-        if plugin_name not in onode["plugins"]:
-            continue
-
-        product_names = onode["product_names"]
-
-        if (
-            product_names
-            and not any(
-                re.search(s.lower(), product_name.lower())
-                for s in product_names
-            )
-        ):
-            continue
-
-        override_imageio_node = onode
-        break
+    override_imageio_node = get_matching_override_node(
+        node_class, plugin_name, product_name
+    )
 
     # add overrides to imageio_node
     if override_imageio_node:
@@ -3996,13 +4022,6 @@ def get_version_from_path(file):
         )
 
 
-def version_up_script():
-    ''' Raising working script's version
-    '''
-    import nukescripts
-    nukescripts.script_and_write_nodes_version_up()
-
-
 def check_product_name_exists(nodes, product_name):
     """
     Checking if node is not already created to secure there is no duplicity
@@ -4047,12 +4066,18 @@ def get_work_default_directory(data):
         project_name, folder_path, task_name, host_name
     )
     data.update(context_data)
+    product_type = data["productType"]
+    product_base_type = data.get("productBaseType")
+    if not product_base_type:
+        product_base_type = product_type
+
     data.update({
         "subset": data["productName"],
-        "family": data["productType"],
+        "family": product_base_type,
         "product": {
             "name": data["productName"],
-            "type": data["productType"],
+            "type": product_type,
+            "basetype": product_base_type,
         },
         "frame": "#" * frame_padding,
     })
@@ -4999,10 +5024,16 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
             nuke_imageio_writes = None
             if avalon_knob_data:
                 # establish families
-                product_type = avalon_knob_data.get("productType")
-                if product_type is None:
-                    product_type = avalon_knob_data["family"]
-                families = [product_type]
+                product_base_type = (
+                    avalon_knob_data.get("productBaseType")
+                    or avalon_knob_data.get("productType")
+                )
+                # this shouldn't happen anymore, only with very old data
+                # and should be removed later when all avalon data api is
+                # also removed.
+                if product_base_type is None:
+                    product_base_type = avalon_knob_data["family"]
+                families = [product_base_type]
                 if avalon_knob_data.get("families"):
                     families.append(avalon_knob_data.get("families"))
 
@@ -5696,7 +5727,7 @@ def add_scripts_menu():
         return
 
     # run the launcher for Maya menu
-    studio_menu = launchfornuke.main(title=_menu.title())
+    studio_menu = launchfornuke.main(title=_menu)
 
     # apply configuration
     studio_menu.build_from_configuration(studio_menu, config)
@@ -5732,10 +5763,13 @@ def add_scripts_gizmo():
             continue
 
         if option == "gizmo_source_dir":
-            gizmo_paths_to_add = gizmos[platform_name]
+            gizmo_paths_to_add = []
+            for path in gizmos[platform_name]:
+                if not path:
+                    continue
+                path = StringTemplate.format_template(path, template_data)
+                gizmo_paths_to_add.append(path)
             if gizmo_paths_to_add:
-                gizmo_paths_to_add = StringTemplate.format_template(
-                    gizmo_paths_to_add, template_data)
                 toolbar_menu.add_gizmo_path(gizmo_paths_to_add)
         elif option == "gizmo_definition":
             for gizmo in gizmos:
