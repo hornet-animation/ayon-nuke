@@ -1,10 +1,9 @@
 name: Sync with Upstream
 
 # Polls ynput/ayon-nuke:develop for new commits.
-# - If rebase of our develop onto upstream succeeds force-pushe to develop
-#   from there normal package release dispatches
-#   hornet_package_release.yml with the upstream version as input
-# - If rebase fails → opens a PR
+# - If merge of upstream/develop into our develop succeeds, pushes to develop
+#   and dispatches hornet_package_release.yml with the upstream version as input
+# - If merge fails → opens a PR
 
 on:
   schedule:
@@ -53,38 +52,40 @@ jobs:
             git log --oneline "${MERGE_BASE}..upstream/develop"
           fi
 
-      - name: Attempt rebase onto upstream/develop
-        id: rebase
+      - name: Attempt merge with upstream/develop
+        id: merge
         if: steps.check.outputs.has_new == 'true'
         run: |
-          if git rebase upstream/develop; then
+          if git merge upstream/develop; then
             echo "success=true" >> "$GITHUB_OUTPUT"
-            echo "Rebase succeeded."
+            echo "Merge succeeded."
           else
             # package.py and version.py always conflict because we maintain our own
             # version scheme — auto-resolve them by keeping our commit's version.
             # The release workflow will set the final correct version regardless.
-            # (During rebase, --theirs = our commit being replayed, not upstream.)
+            # (During merge, --ours = our develop branch, --theirs = upstream.)
             for f in package.py client/ayon_nuke/version.py; do
               if git diff --name-only --diff-filter=U | grep -qx "$f"; then
                 echo "Auto-resolving $f (keeping our version)"
-                git checkout --theirs "$f"
+                git checkout --ours "$f"
                 git add "$f"
               fi
             done
 
-            if GIT_EDITOR=true git rebase --continue; then
+            # Check if all conflicts are now resolved
+            if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+              git commit --no-edit
               echo "success=true" >> "$GITHUB_OUTPUT"
-              echo "Rebase succeeded after auto-resolving version file conflicts."
+              echo "Merge succeeded after auto-resolving version file conflicts."
             else
-              git rebase --abort
+              git merge --abort
               echo "success=false" >> "$GITHUB_OUTPUT"
-              echo "Rebase failed — conflicts detected."
+              echo "Merge failed — conflicts detected."
             fi
           fi
 
-      - name: Push rebased develop and dispatch release
-        if: steps.check.outputs.has_new == 'true' && steps.rebase.outputs.success == 'true'
+      - name: Push merged branch and trigger release
+        if: steps.check.outputs.has_new == 'true' && steps.merge.outputs.success == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -92,7 +93,7 @@ jobs:
           # GITHUB_TOKEN is carried over from the original action env
           # so the release workflow won't double-fire from the push.
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git push origin HEAD:develop --force-with-lease
+          git push origin HEAD:develop
 
           # Dispatch the release workflow 
           gh workflow run hornet_package_release.yml \
@@ -101,7 +102,7 @@ jobs:
 
       - name: Check for existing conflict PR
         id: existing_pr
-        if: steps.check.outputs.has_new == 'true' && steps.rebase.outputs.success == 'false'
+        if: steps.check.outputs.has_new == 'true' && steps.merge.outputs.success == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -112,7 +113,7 @@ jobs:
       - name: Open PR for manual conflict resolution
         if: >
           steps.check.outputs.has_new == 'true' &&
-          steps.rebase.outputs.success == 'false' &&
+          steps.merge.outputs.success == 'false' &&
           steps.existing_pr.outputs.count == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -133,11 +134,11 @@ jobs:
 
           gh pr create \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Upstream sync conflict — manual rebase required (${TIMESTAMP})" \
+            --title "Upstream sync conflict — cannot automatically merge (${TIMESTAMP})" \
             --body "$(cat <<PREOF
           ## Upstream sync failed
 
-          Automatic rebase of \`hornet-animation/ayon-nuke:develop\` onto \`ynput/ayon-nuke:develop\` failed due to merge conflicts.
+          Automatic merge of \`ynput/ayon-nuke:develop\` into \`hornet-animation/ayon-nuke:develop\` failed due to merge conflicts.
 
           The diff on this PR shows the incoming upstream commits. Once resolved, close this PR.
 
@@ -155,9 +156,10 @@ jobs:
 
           git fetch upstream
           git checkout develop
-          git rebase upstream/develop
-          # For each conflict: resolve → git add <file> → git rebase --continue
-          git push origin develop --force-with-lease
+          git merge upstream/develop
+          # For each conflict: resolve → git add <file>
+          git merge --continue
+          git push origin develop
           \`\`\`
 
           _Opened automatically by the upstream sync workflow._
@@ -169,7 +171,7 @@ jobs:
       - name: Skip duplicate conflict PR
         if: >
           steps.check.outputs.has_new == 'true' &&
-          steps.rebase.outputs.success == 'false' &&
+          steps.merge.outputs.success == 'false' &&
           steps.existing_pr.outputs.count != '0'
         run: |
           echo "A conflict PR is already open — skipping duplicate creation."
