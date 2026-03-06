@@ -444,6 +444,7 @@ def navigate_to_publish(write_node):
     """
 
     path = assemble_publish_path(write_node)
+    path = path if path.is_dir() else path.parent
     if not path:
         return
     

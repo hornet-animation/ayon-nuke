@@ -116,6 +116,8 @@ def getSubmitterInfo():
 
 def get_frame_range_for_deadline(knobValues):
     """Generate frame range string with interval for Deadline submission"""
+    if 'framelist' in knobValues and knobValues.get('framelist'):
+        return knobValues['framelist']
     try:
         start = int(knobValues.get("first", nuke.root().firstFrame()))
         end = int(knobValues.get("last", nuke.root().lastFrame()))
@@ -157,6 +159,7 @@ def getNodeSubmissionInfo(node):
         "deadlineChunkSize",
         "concurrentTasks",
         "renderInterval",
+        "framelist"
     ]
 
     # relevant_inside_knobs = ["first", "last"]
@@ -248,6 +251,8 @@ def build_request(knobValues, temp_script_path, node):
     # Include critical environment variables with submission
     print("build_request")
     submissionEnvVars = [
+        "AYON_PROJECT_NAME",
+        "AYON_FOLDER_PATH",
         "HORNET_ROOT",
         "NUKE_PATH",
         "OCIO",

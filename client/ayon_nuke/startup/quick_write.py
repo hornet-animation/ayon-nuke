@@ -6,6 +6,9 @@ import hornet_deadline_utils
 from ayon_core.lib import Logger
 from ayon_core.settings import get_current_project_settings
 
+import ayon_nuke.api.lib as lib
+from hornet_deadline_utils import save_script_with_render, deadlineNetworkSubmit
+
 from ayon_nuke.api.lib import (
     create_write_node,
     INSTANCE_DATA_KNOB,
@@ -63,7 +66,39 @@ def ovs_write_node(family="render"):
     variant = nuke.getInput("Variant for Emergency Write Node", "Main").title()
     _quick_write_node(variant, family, is_ovs=True)
 
+def quick_node_data(family="render", variant="_Main", is_ovs=False):
+    folder_path = os.environ["AYON_FOLDER_PATH"]
+    if "/" in folder_path:
+        ayon_asset_name = folder_path.split("/")[-1]
+    else:
+        ayon_asset_name = folder_path
+    ayon_hierarchy = [p for p in folder_path.split("/")[:-1] if p]
+    if len(ayon_hierarchy) > 1:
+        ayon_hierarchy = "/".join(folder_path.split("/")[:-1])
+        ayon_parents = [p for p in folder_path.split('/')[:-1] if p] # splitting on / when the path starts with / gives us an empty [0]
+    else:
+        ayon_hierarchy = ayon_hierarchy[0]
+        ayon_parents = [ayon_hierarchy]
 
+    return {
+        "subset": family + os.environ["AYON_TASK_NAME"] + variant,
+        "variant": variant,
+        "id": "pyblish.avalon.instance",
+        "creator": f"create_write_{family}",
+        "creator_identifier": f"create_write_{family}",
+        "folderPath": os.environ['AYON_FOLDER_PATH'],
+        "task": os.environ["AYON_TASK_NAME"],
+        "productBaseType": family,
+        "productType": family,
+        "productName": family + os.environ["AYON_TASK_NAME"] + variant,
+        "hierarchy": ayon_hierarchy,
+        "folder": {"name": folder_path.split("/")[-1],
+                   'type': 'Shot',
+                   'path': os.environ['AYON_FOLDER_PATH'],
+                   'parents': ayon_parents},
+        "fpath_template": "{work}/renders/nuke/{subset}/{subset}.{frame}.{ext}",
+        "is_ovs": is_ovs,
+    }
 def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
     """
     Separated this from the nuke.getInput call to allow calls from other scripts,
@@ -78,18 +113,9 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
 
     nuke.tprint("quick write node")
 
-    if "/" in os.environ["AYON_FOLDER_PATH"]:
-        ayon_asset_name = os.environ["AYON_FOLDER_PATH"].split("/")[-1]
-    else:
-        ayon_asset_name = os.environ["AYON_FOLDER_PATH"]
-
-    # ayon_asset_name = os.environ["AYON_FOLDER_PATH"]
-    folder_path = os.environ["AYON_FOLDER_PATH"]
-    print(type(folder_path))
-
     if any(
         var is None or var == ""
-        for var in [os.environ["AYON_TASK_NAME"], ayon_asset_name]
+        for var in [os.environ["AYON_TASK_NAME"], os.environ["AYON_FOLDER_PATH"]]
     ):
         nuke.alert(
             "missing AYON_TASK_NAME and AYON_FOLDER_PATH, can't make quick write"
@@ -116,24 +142,9 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
         ):
             nuke.message("Write Node already exists")
             return
-    data = {
-        "subset": family + os.environ["AYON_TASK_NAME"] + variant,
-        "variant": variant,
-        "id": "pyblish.avalon.instance",
-        "creator": f"create_write_{family}",
-        "creator_identifier": f"create_write_{family}",
-        "folderPath": ayon_asset_name,
-        "task": os.environ["AYON_TASK_NAME"],
-        "productType": family,
-        "task": {"name": os.environ["AYON_TASK_NAME"]},
-        "productName": family + os.environ["AYON_TASK_NAME"] + variant,
-        "hierarchy": "/".join(os.environ["AYON_FOLDER_PATH"].split("/")[:-1]),
-        "folder": {"name": os.environ["AYON_FOLDER_PATH"].split("/")[-1]},
-        "fpath_template": "{work}/renders/nuke/{subset}/{subset}.{frame}.{ext}",
-        "is_ovs": is_ovs,
-    }
+    data = quick_node_data(family, variant, is_ovs)
     qnode = create_write_node(
-        family + os.environ["AYON_TASK_NAME"] + variant,
+        data["subset"],
         data,
         prerender=True if family == "prerender" else False,
         inpanel=inpanel,
@@ -273,6 +284,7 @@ def embedOptions():
     renderLast.makeLink(nde.name(), "last")
     renderLast.setName("last")
     renderLast.setLabel("Render End")
+    framelist = nuke.String_Knob("framelist", "Frame List", "")
 
     publishFirst = nuke.Int_Knob("publishFirst", "Publish Start")
     publishLast = nuke.Int_Knob("publishLast", "Publish End")
@@ -281,13 +293,15 @@ def embedOptions():
         "usePublishRange", "My Publish Range is different from my render range"
     )
 
+    framelist.setValue("1001-1100")
     nde.knob("first").setValue(nuke.root().firstFrame())
     nde.knob("last").setValue(nuke.root().lastFrame())
     publishFirst.setValue(nuke.root().firstFrame())
     publishLast.setValue(nuke.root().lastFrame())
-    publishFirst.setEnabled(False)
-    publishLast.setEnabled(False)
-    usePublishRange.setValue(False)
+    publishFirst.setEnabled(True)
+    publishLast.setEnabled(True)
+    #to be removed, set to true by default while framelist is tested
+    usePublishRange.setValue(True)
 
     endGroup = nuke.Tab_Knob("endoutput", None, nuke.TABENDGROUP)
     group.addKnob(endGroup)
@@ -295,27 +309,25 @@ def embedOptions():
         "beginpipeline", "Rendering and Pipeline", nuke.TABBEGINGROUP
     )
     group.addKnob(beginGroup)
-    group.addKnob(renderFirst)
+    group.addKnob(framelist)
     group.addKnob(publishFirst)
-    group.addKnob(renderLast)
     group.addKnob(publishLast)
-    group.addKnob(usePublishRange)
 
     renderInterval = nuke.Int_Knob("renderInterval", "Render every")
     renderInterval.setValue(1)
     renderInterval.setTooltip(
         "Render every N frames (1 = every frame, 2 = every other frame, etc.)"
     )
-    group.addKnob(renderInterval)
+    #group.addKnob(renderInterval)
 
     renderIntervalLabel = nuke.Text_Knob("renderIntervalLabel", "", "frame(s)")
     renderIntervalLabel.clearFlag(nuke.STARTLINE)
-    group.addKnob(renderIntervalLabel)
+    #group.addKnob(renderIntervalLabel)
 
     submit_to_deadline = nuke.PyScript_Knob(
         "submit",
         "Submit to Deadline",
-        "try:\n    update_ovs_write_version(nuke.thisNode())\n    if nuke.thisNode().knob('_cancelled') and nuke.thisNode()['_cancelled'].value():\n        print('Submit cancelled by user')\n    else:\n        deadlineNetworkSubmit()\nexcept Exception as e:\n    print(f'Error in submit: {e}')",
+        "render_or_submit(nuke.thisNode())",
     )
 
     clear_temp_outputs_button = nuke.PyScript_Knob(
@@ -337,7 +349,7 @@ def embedOptions():
     render_local_button = nuke.PyScript_Knob(
         "renderlocal",
         "Render Local",
-        "import ayon_nuke.api.lib as lib\ntry:\n    update_ovs_write_version(nuke.thisNode())\n    if nuke.thisNode().knob('_cancelled') and nuke.thisNode()['_cancelled'].value():\n        print('Render cancelled by user')\n    else:\n        nuke.toNode(f'inside_{nuke.thisNode().name()}').knob('Render').execute()\n        save_script_with_render(nuke.thisNode()['File output'].getValue(),lib.get_node_data(nuke.thisNode(),'publish_instance')['is_ovs'])\nexcept Exception as e:\n    print(f'Error in render: {e}')",
+        "render_or_submit(nuke.thisNode(), local=True)",
     )
 
     div = nuke.Text_Knob("div", "", "")
@@ -496,7 +508,7 @@ def embed_quick_publish():
         data = json.loads(
             group.knobs()["publish_instance"].value().replace("JSON:::", "", 1)
         )
-        product_type = data.get("productType", "")
+        product_type = data.get("productBaseType", "")
         is_prerender = product_type == "prerender"
     except (KeyError, TypeError, ValueError):
         is_prerender = False
@@ -661,6 +673,26 @@ def get_frame_range_with_interval(node):
         )
 
 
+def render_or_submit(node, local=False):
+    """ wrapper for Deadline and Render Local buttons."""
+    if not check_shot_context(node):
+        print("aborted shot context mismatch")
+        return
+    if lib.get_node_data(node, "publish_instance").get("is_ovs"):
+        update_ovs_write_version(node)
+    if node.knob("_cancelled") and node["_cancelled"].value():
+        print("Cancelled by user")
+        return
+    if local:
+        nuke.toNode(f"inside_{node.name()}").knob("Render").execute()
+        save_script_with_render(
+            node["File output"].getValue(),
+            lib.get_node_data(node, "publish_instance")["is_ovs"],
+        )
+    else:
+        deadlineNetworkSubmit()
+
+
 def update_ovs_write_version(node):
     """Set the version of ovs quickwrite filepaths based on latest target version."""
 
@@ -820,5 +852,51 @@ def refresh_deadline_callback():
         except Exception as e:
             log.error(f"Error refreshing deadline groups: {e}")
 
+## we may have a node copied from another script with the wrong instance data
+## this can result in rendering to someone elses shot. Alert the user
+def check_shot_context(node):
+    if INSTANCE_DATA_KNOB not in node.knobs():
+        return True
+    data = json.loads(
+        node.knobs()[INSTANCE_DATA_KNOB].value().replace("JSON:::", "", 1)
+    )
+    family = data.get("productBaseType", "render")
+    variant = data.get("variant", "_Main")
+    is_ovs = data.get("is_ovs", False)
+    expected = quick_node_data(family, variant, is_ovs)
 
+    # these fields are the true context
+    mismatched = []
+    changes_details = []
+    for key in ("folderPath", "hierarchy", "folder", "task"):
+        if data.get(key) != expected.get(key):
+            mismatched.append(key)
+            changes_details.append(
+                f"  {key}: '{data.get(key)}' -> '{expected.get(key)}'"
+            )
 
+    if not mismatched:
+        return True
+
+    node_name = node.name()
+    changes_str = "\n".join(changes_details)
+    msg = (
+        f"Node '{node_name}' has node data that doesn't match the shot context.\n\n"
+        f"This can happen when a node is copied from another script.\n\n"
+        f"The following changes will be made:\n"
+        f"{changes_str}\n\n"
+        f"Update instance data to match the current context?"
+    )
+    if nuke.ask(msg):
+        for key in ("folderPath", "hierarchy", "folder", "task",
+                     "subset", "productName"):
+            data[key] = expected[key]
+        node.knobs()[INSTANCE_DATA_KNOB].setValue(
+            "JSON:::" + json.dumps(data)
+        )
+        log.info(f"Patched instance data on '{node_name}' to match current context")
+        nuke.message(f"Updated '{node_name}' to current shot context.")
+        return True
+
+    log.warning(f"Shot context mismatch on '{node_name}', user declined fix — blocking submission")
+    return False

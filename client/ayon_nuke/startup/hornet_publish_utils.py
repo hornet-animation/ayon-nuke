@@ -321,7 +321,7 @@ def quick_publish(
         completed_plugins = [0]  # Use list to allow modification in nested function
         total_plugins = len(plugins)
 
-        def on_plugin_processed(*args, **kwargs):
+        def on_plugin_processed(result):
             """Callback fired after each plugin processes"""
             completed_plugins[0] += 1
             # Map plugin progress from 30% to 100% (70% of total progress bar)
@@ -329,12 +329,12 @@ def quick_publish(
             total_progress = 30 + plugin_progress
             task.setProgress(total_progress)
 
-            # Extract plugin name - try multiple approaches
+            # Extract plugin name from result object
             plugin_name = "Unknown"
-
-            # Try getting from kwargs
-            if 'plugin' in kwargs:
-                plugin = kwargs['plugin']
+            
+            # The result object has a 'plugin' attribute
+            if hasattr(result, 'plugin') and result.plugin:
+                plugin = result.plugin
                 if hasattr(plugin, '__name__'):
                     plugin_name = plugin.__name__
                 elif hasattr(plugin, 'label'):
@@ -344,17 +344,7 @@ def quick_publish(
                 elif isinstance(plugin, type):
                     plugin_name = plugin.__name__
 
-            # Try getting from args
-            elif args and len(args) > 0:
-                plugin = args[0]
-                if hasattr(plugin, '__name__'):
-                    plugin_name = plugin.__name__
-                elif hasattr(plugin, 'label'):
-                    plugin_name = plugin.label
-                elif isinstance(plugin, type):
-                    plugin_name = plugin.__name__
-
-            task.setMessage(f"Running {plugin_name}... ({completed_plugins[0]}/{total_plugins})")
+            task.setMessage(f"{plugin_name} ({completed_plugins[0]}/{total_plugins})")
 
             # Check if user cancelled
             if task.isCancelled():

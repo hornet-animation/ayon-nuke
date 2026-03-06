@@ -10,8 +10,6 @@ import copy
 
 import hornet_publish_review_media
 
-reload(hornet_publish_review_media)
-
 import inspect
 
 
@@ -177,10 +175,10 @@ class IntegrateProresReview(
         colorspace = instance.data.get("colorspace", None)
         framestart = instance.data["frameStart"]
         frameend = instance.data["frameEnd"]
-       
+        print(instance.data.get('anatomyData'))
         shot = (
             anatomy_data := instance.data.get("anatomyData")
-        ) and anatomy_data.get("asset")
+        ) and anatomy_data.get("folder").get('name')
 
         version = (
             anatomy_data := instance.data.get("anatomyData")

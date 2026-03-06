@@ -7,7 +7,6 @@ class CollectInstanceData(pyblish.api.InstancePlugin):
     """Collect Nuke instance data
 
     """
-
     order = pyblish.api.CollectorOrder - 0.49
     label = "Collect Nuke Instance Data"
     hosts = ["nuke", "nukeassist"]
@@ -19,7 +18,7 @@ class CollectInstanceData(pyblish.api.InstancePlugin):
 
     def process(self, instance):
         product_base_type = instance.data["productBaseType"]
-
+        product_type = instance.data['productType']
         # Get format
         root = nuke.root()
         format_ = root['format'].value()
