@@ -293,7 +293,7 @@ def embedOptions():
         "usePublishRange", "My Publish Range is different from my render range"
     )
 
-    framelist.setValue("1001-1100")
+    framelist.setValue(f"{nuke.root().firstFrame()}-{nuke.root().lastFrame()}")
     nde.knob("first").setValue(nuke.root().firstFrame())
     nde.knob("last").setValue(nuke.root().lastFrame())
     publishFirst.setValue(nuke.root().firstFrame())

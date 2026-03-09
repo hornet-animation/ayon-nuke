@@ -331,18 +331,11 @@ def quick_publish(
 
             # Extract plugin name from result object
             plugin_name = "Unknown"
-            
+            print(result)
             # The result object has a 'plugin' attribute
-            if hasattr(result, 'plugin') and result.plugin:
-                plugin = result.plugin
-                if hasattr(plugin, '__name__'):
-                    plugin_name = plugin.__name__
-                elif hasattr(plugin, 'label'):
-                    plugin_name = plugin.label
-                elif hasattr(plugin, 'name'):
-                    plugin_name = plugin.name
-                elif isinstance(plugin, type):
-                    plugin_name = plugin.__name__
+            plugin = result.get("plugin")
+            if plugin:
+                plugin_name = getattr(plugin, "label", None) or plugin.__name__
 
             task.setMessage(f"{plugin_name} ({completed_plugins[0]}/{total_plugins})")
 

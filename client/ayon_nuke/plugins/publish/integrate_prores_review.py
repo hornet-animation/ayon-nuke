@@ -178,7 +178,7 @@ class IntegrateProresReview(
         print(instance.data.get('anatomyData'))
         shot = (
             anatomy_data := instance.data.get("anatomyData")
-        ) and anatomy_data.get("folder").get('name')
+        ) and anatomy_data.get("folder", {}).get('name')
 
         version = (
             anatomy_data := instance.data.get("anatomyData")

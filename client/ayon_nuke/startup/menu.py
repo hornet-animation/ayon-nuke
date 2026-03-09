@@ -22,34 +22,71 @@ from quick_write import (
     presets,
     embed_quick_publish,
     handle_farm_publish_logic,
-    quick_publish_wrapper,
     show_quick_publish_info,
-    quick_write_node,
-    ovs_write_node,
     quick_publish_wrapper,
     quick_write_node,
     ovs_write_node,
-    quick_publish_wrapper,
     update_ovs_write_version,
     _quick_write_node,
+    render_or_submit,
 )
-from hornet_deadline_utils import save_script_with_render, deadlineNetworkSubmit
+from hornet_deadline_utils import deadlineNetworkSubmit
 from hornet_publish_utils import quick_publish
-from ayon_core.pipeline import install_host
+from ayon_core.pipeline import (
+    install_host,
+    get_current_folder_path,
+    get_current_task_name,
+    get_current_project_name,
+)
 from ayon_nuke.api import NukeHost
 from ayon_core.lib import Logger
 from ayon_nuke.api.lib import WorkfileSettings
-
-
+from ayon_core.tools.utils import host_tools
+import ayon_api
 import hornet_publish_review_media
 import hornet_deadline_utils
 import file_sequence
 import views_write
+from reload_hornet import reload_hornet_modules
+
+# Version Up Workfile import
+from ayon_core.pipeline.workfile import save_next_version as _save_next_version
 
 host = NukeHost()
 install_host(host)
 
 log = Logger.get_logger(__name__)
+
+
+def set_blank_workfile_frame_range():
+    #Set root frame range from Ayon task attributes when opening a blank workfile.
+    if nuke.root().name() != "Root":
+        return
+
+        # Get current context from environment
+    project_name = get_current_project_name()
+    folder_path = get_current_folder_path()
+    task_name = get_current_task_name()
+
+    if not all([project_name, folder_path, task_name]):
+        log.warning("Cannot set frame range: missing context data")
+        return
+
+    folder_entity = ayon_api.get_folder_by_path(project_name, folder_path)
+    task_entity = ayon_api.get_task_by_name(
+        project_name, folder_entity["id"], task_name
+    )
+
+    task_attributes = task_entity.get("attrib", {})
+    frame_end = task_attributes.get("frameEnd")
+    frame_start = task_attributes.get("frameStart")
+
+    nuke.root()["first_frame"].setValue(int(frame_start))
+    nuke.root()["last_frame"].setValue(int(frame_end))
+
+    log.info(f"Set blank workfile frame range: {frame_start}-{frame_end}")
+
+
 
 def apply_format_presets():
     # print("apply_format_presets")
@@ -227,8 +264,6 @@ def check_and_show_publisher():
     #         if not nuke.ask("Files exist in publish location. Conitue?"):
     #             return
 
-    from ayon_core.tools.utils import host_tools
-
     host_tools.show_publisher(tab="Publish")
 
 
@@ -298,6 +333,7 @@ nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
 nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
+nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
 
 
 nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
@@ -327,3 +363,9 @@ project_toolbar.addCommand(
     name="Add Toolset", command="node_loader.add_toolset()"
 )
 project_toolbar.addCommand(name="Reload", command="node_loader.populate()")
+
+nuke.menu("Nuke").addCommand(
+    "File/Version Up Workfile",
+    _save_next_version,
+    "alt+shift+s"
+)
