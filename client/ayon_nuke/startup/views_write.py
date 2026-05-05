@@ -6,7 +6,7 @@ import nuke
 import ast
 import hornet_deadline_utils
 
-from PySide2 import QtWidgets, QtCore  # type: ignore
+from qtpy import QtWidgets, QtCore  # type: ignore
 from ayon_core.pipeline import registered_host, Anatomy
 from ayon_nuke.api.lib import get_version_from_path
 

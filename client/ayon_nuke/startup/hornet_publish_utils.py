@@ -87,19 +87,11 @@ def quick_publish(
         if target_instance is None:
             raise Exception(f"No instance found for node: {node.name()}")
 
-        # Check if this is a single frame render by checking the write node's frame range
-        write_node = None
+        # Check if this is a single frame render by checking the publish frame range
         group_node = node
         if group_node.Class() == "Group":
-            with group_node:
-                for child_node in nuke.allNodes():
-                    if child_node.Class() == "Write":
-                        write_node = child_node
-                        break
-
-        if write_node:
-            first_frame = int(write_node["first"].getValue())
-            last_frame = int(write_node["last"].getValue())
+            first_frame = int(group_node["publishFirst"].value())
+            last_frame = int(group_node["publishLast"].value())
             if first_frame == last_frame:
                 log.info(f'Single frame render detected ({first_frame}), switching publish to "image" family')
                 target_instance.data['family'] = 'image'

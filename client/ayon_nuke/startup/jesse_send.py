@@ -2,7 +2,7 @@ import nuke
 import nukescripts
 from pathlib import Path
 from datetime import datetime
-from PySide2.QtCore import QTimer
+from qtpy.QtCore import QTimer
 
 # Changing node locations for jesse send to the T drive
 #NODE_LOCATION = Path(r"P:\dev\alexh_dev\jesseSend")

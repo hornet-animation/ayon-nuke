@@ -261,6 +261,8 @@ def build_request(knobValues, temp_script_path, node):
         "OFX_PLUGIN_PATH",
         "RVL_SERVER",
         "neatlab_LICENSE",
+        "AYON_USE_DEV",
+        "AYON_USE_STAGING"
     ]
     environment = dict(
         {k: os.environ[k] for k in submissionEnvVars if k in os.environ.keys()}

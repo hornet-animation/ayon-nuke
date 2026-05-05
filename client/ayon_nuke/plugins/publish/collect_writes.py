@@ -147,23 +147,14 @@ class CollectNukeWrites(
         # Get the group node that contains the write node
         group_node = instance.data["transientData"]["node"]
 
-        # Check if group node has publish range settings
-        if (
-            group_node.Class() == "Group"
-            and "usePublishRange" in group_node.knobs()
-            and group_node.knob("usePublishRange").value()
-        ):
-            first_frame = int(group_node["publishFirst"].value())
-            last_frame = int(group_node["publishLast"].value())
-            self.log.info(
-                f"Using publish range from group node: {first_frame}-{last_frame}"
-            )
-            self._frame_ranges[instance_name] = (first_frame, last_frame)
-            return first_frame, last_frame
+        first_frame = int(group_node["publishFirst"].value())
+        last_frame = int(group_node["publishLast"].value())
+        self.log.info(
+            f"Using publish range from group node: {first_frame}-{last_frame}"
+        )
+        self._frame_ranges[instance_name] = (first_frame, last_frame)
+        return first_frame, last_frame
 
-        # Get frame range from write node if activated
-        first_frame = int(write_node["first"].getValue())
-        last_frame = int(write_node["last"].getValue())
 
         # add to cache
         self._frame_ranges[instance_name] = (first_frame, last_frame)
@@ -181,6 +172,7 @@ class CollectNukeWrites(
             colorspace (str): colorspace
         """
         product_base_type = instance.data["productBaseType"]
+        product_type = product_base_type  # Default to base type
 
         # Check if this is a single frame render - detect it here directly
         first_frame, last_frame = self._get_frame_range_data(instance)

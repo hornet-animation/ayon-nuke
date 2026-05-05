@@ -1,6 +1,6 @@
-from PySide2 import QtWidgets as qtw
-from PySide2 import QtGui as qtg
-from PySide2 import QtCore as qtc
+from qtpy import QtWidgets as qtw
+from qtpy import QtGui as qtg
+from qtpy import QtCore as qtc
 import nuke
 
 class View(qtw.QWidget):

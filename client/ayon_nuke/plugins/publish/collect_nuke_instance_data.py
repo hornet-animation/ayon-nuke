@@ -64,8 +64,8 @@ class CollectInstanceData(pyblish.api.InstancePlugin):
                             break
 
             if write_node:
-                first_frame = int(write_node["first"].getValue())
-                last_frame = int(write_node["last"].getValue())
+                first_frame = int(group_node["publishFirst"].value())
+                last_frame = int(group_node["publishLast"].value())
 
                 if first_frame == last_frame:
                     self.log.info(
