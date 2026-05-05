@@ -32,6 +32,7 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
     optional = True
 
     def process(self, instance):
+        self.log.info("Processing instance: %s", instance.data.get("name"))
         project_settings = instance.context.data["project_settings"]
         plugin_settings = (
             project_settings.get("nuke", {})
@@ -40,6 +41,7 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
         )
 
         if not plugin_settings.get("enabled", False):
+            self.log.info("Plugin is disabled, skipping")
             return
 
         criteria = {
@@ -49,6 +51,7 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
             "task_names":    instance.data.get("task", ""),
             "product_names": instance.data.get("productName", ""),
         }
+        self.log.debug("Filter criteria: %s", criteria)
         if not _filters_match(plugin_settings, criteria):
             self.log.info("Instance does not match plugin-level filters, skipping")
             return
@@ -57,11 +60,13 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
         if not publish_dir:
             self.log.warning("publishDir not found on instance, skipping")
             return
+        self.log.debug("publishDir: %s", publish_dir)
 
         profiles = plugin_settings.get("profiles", [])
         if not profiles:
             self.log.info("No profiles configured, skipping")
             return
+        self.log.info("Found %d profile(s) to process", len(profiles))
 
         input_pattern, start_frame = self._resolve_input_pattern(instance)
         if not input_pattern:
@@ -86,6 +91,7 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
                 )
                 continue
 
+            self.log.info("Running profile: %s", (profile.get("codec") or {}).get("name"))
             self._run_profile(
                 instance,
                 codec=profile["codec"],
@@ -162,13 +168,15 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
 
         try:
             if nuke.env.get("gui"):
+                self.log.debug("Running with Nuke GUI dialog")
                 self._run_with_dialog(
                     builder.build(), builder.get_env(), codec["name"],
                 )
             else:
+                self.log.debug("Running ffmpeg headless")
                 builder.run(check=True)
         except subprocess.CalledProcessError as exc:
-            self.log.warning(
+            self.log.error(
                 f"FFMpegBuilder failed for codec={codec['name']} "
                 f"(returncode={exc.returncode})"
             )
@@ -241,9 +249,11 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
         """Return ``(pattern_path, start_frame)`` resolved from anatomy."""
         repz = instance.data.get("representations", [])
         ext  = instance.data.get("ext")
+        self.log.debug("Resolving input pattern for ext=%s, representations=%d", ext, len(repz))
 
         for rep in repz:
             if rep.get("ext") != ext:
+                self.log.debug("Skipping representation ext=%s", rep.get("ext"))
                 continue
 
             anatomy       = instance.context.data["anatomy"]
@@ -257,9 +267,10 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
             frame_start = instance.data["frameStart"]
             template_data["frame"] = frame_start
             first_frame_path = str(path_template.format_strict(template_data))
+            self.log.debug("First frame path: %s", first_frame_path)
 
             pattern = _pattern_from_first_frame(first_frame_path, frame_start)
-            self.log.debug(f"Resolved input pattern: {pattern}")
+            self.log.info("Resolved input pattern: %s (start_frame=%s)", pattern, frame_start)
             return pattern, frame_start
 
         self.log.warning("Could not resolve input path for ffmpeg review, skipping")

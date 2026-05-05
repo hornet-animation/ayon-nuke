@@ -10,6 +10,10 @@ from .common import (
     ColorspaceConfigurationModel,
     validate_json_dict,
 )
+from .ffmpeg_review import (
+    IntegrateFFmpegReviewModel,
+    DEFAULT_FFMPEG_REVIEW_SETTINGS,
+)
 
 
 def nuke_render_publish_types_enum():
@@ -293,6 +297,10 @@ class PublishPluginsModel(BaseSettingsModel):
         default_factory=HornetReviewMediaModel,
         section="Integrators",
     )
+    IntegrateFFmpegReview: IntegrateFFmpegReviewModel = SettingsField(
+        title="Integrate FFmpeg Review",
+        default_factory=IntegrateFFmpegReviewModel,
+    )
     IncrementScriptVersion: OptionalPluginModel = SettingsField(
         title="Increment Workfile Version",
         default_factory=OptionalPluginModel,
@@ -440,6 +448,7 @@ DEFAULT_PUBLISH_PLUGIN_SETTINGS = {
         "template_script": r"T:\util\nuke\scripts\publishTemplate\hornet_publish_template.nk",
         #"template_script": r"P:/dev/alexh_dev/hornet_publish/hornet_publish_template.nk",
     },
+    "IntegrateFFmpegReview": DEFAULT_FFMPEG_REVIEW_SETTINGS,
     "IncrementScriptVersion": {
         "enabled": False,
         "optional": True,
