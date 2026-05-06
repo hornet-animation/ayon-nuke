@@ -63,7 +63,6 @@ def text_element_name_enum():
 class FFmpegCodecModel(BaseSettingsModel):
     _layout = "expanded"
 
-    name: str = SettingsField("", title="Codec name (appended to filename)")
     codec: str = SettingsField(
         "prores_ks",
         title="Codec",
@@ -86,22 +85,11 @@ class FFmpegCodecModel(BaseSettingsModel):
         title="Profile / Flavor",
         enum_resolver=profile_enum,
     )
-    crf: int = SettingsField(
-        23,
-        title="CRF (h264/x265 quality)",
-        ge=0,
-        le=51,
-    )
-    bitrate: str = SettingsField(
-        "",
-        title="Bitrate",
-        placeholder="e.g. 10M",
-    )
     extra_args: str = SettingsField(
         "",
         title="Extra ffmpeg args",
         widget="textarea",
-        placeholder="-tune film -g 48 -bf 2 -vendor ap10",
+        placeholder="-crf 23 -b:v 10M -tune film -g 48 -bf 2 -vendor ap10",
     )
 
 
@@ -111,7 +99,7 @@ class FFmpegColorspaceModel(BaseSettingsModel):
 
 
 class FFmpegCropmaskModel(BaseSettingsModel):
-    _layout = "compact"
+    _isGroup = True
     enable: bool = SettingsField(False, title="Enable")
     aspect: float = SettingsField(2.39, title="Aspect ratio", gt=0)
     opacity: float = SettingsField(0.5, title="Bar opacity", ge=0, le=1)
@@ -135,13 +123,15 @@ class FFmpegTextElementModel(BaseSettingsModel):
     box: FFmpegBoxModel = SettingsField(
         default_factory=FFmpegBoxModel, title="Box (0–1, BL origin)"
     )
-    font: str = SettingsField("", title="Font (override)")
+    font: str = SettingsField(
+        "", title="Font",
+        description="Path; falls back to the bundled Inter when empty.",
+    )
     font_size: float = SettingsField(
-        0.0, title="Size (override, 0 = inherit)", ge=0, le=1
+        0.02, title="Size (fraction of width)", gt=0, le=1,
     )
     font_color: ColorRGBA_float = SettingsField(
-        (1.0, 1.0, 1.0, 1.0),
-        title="Color (override)",
+        (1.0, 1.0, 1.0, 1.0), title="Color",
     )
     justify: Literal["left", "center", "right"] = SettingsField(
         "left",
@@ -156,17 +146,10 @@ class FFmpegTextElementModel(BaseSettingsModel):
 
 
 class FFmpegBurninModel(BaseSettingsModel):
-    _layout = "expanded"
-    enabled: bool = SettingsField(False, title="Enable burn-ins")
-    font: str = SettingsField("", title="Default font path")
-    font_size: float = SettingsField(
-        0.02, title="Default size (fraction of width)", gt=0, le=1
+    _isGroup = True
+    cropmask: FFmpegCropmaskModel = SettingsField(
+        default_factory=FFmpegCropmaskModel, title="Crop mask",
     )
-    font_color: ColorRGBA_float = SettingsField(
-        (0.8, 0.8, 0.8, 1.0),
-        title="Default color",
-    )
-    cropmask: FFmpegCropmaskModel = SettingsField(default_factory=FFmpegCropmaskModel)
     text_elements: list[FFmpegTextElementModel] = SettingsField(
         default_factory=list,
         title="Text elements",
@@ -175,6 +158,14 @@ class FFmpegBurninModel(BaseSettingsModel):
 
 class FFmpegProfileModel(BaseSettingsModel):
     _isGroup = True
+    name: str = SettingsField(
+        "",
+        title="Profile name",
+        description=(
+            "Identifies this deliverable. Used as the filename suffix and "
+            "AYON representation name; appears as the row label in this list."
+        ),
+    )
     product_types: list[str] = SettingsField(
         default_factory=list, title="Product types"
     )
@@ -185,19 +176,20 @@ class FFmpegProfileModel(BaseSettingsModel):
     )
     task_types: list[str] = SettingsField(default_factory=list, title="Task types")
     task_names: list[str] = SettingsField(default_factory=list, title="Task names")
-    product_names: list[str] = SettingsField(
-        default_factory=list, title="Product names"
-    )
 
-    codec: FFmpegCodecModel = SettingsField(default_factory=FFmpegCodecModel)
-    colorspace: FFmpegColorspaceModel = SettingsField(
-        default_factory=FFmpegColorspaceModel
+    codec: FFmpegCodecModel = SettingsField(
+        default_factory=FFmpegCodecModel, title="Codec",
     )
-    burnin: FFmpegBurninModel = SettingsField(default_factory=FFmpegBurninModel)
+    colorspace: FFmpegColorspaceModel = SettingsField(
+        default_factory=FFmpegColorspaceModel, title="Colorspace",
+    )
+    burnin: FFmpegBurninModel = SettingsField(
+        default_factory=FFmpegBurninModel, title="Burn-ins",
+    )
 
 
 class IntegrateFFmpegReviewModel(BaseSettingsModel):
-    _layout = "expanded"
+    _isGroup = True
     enabled: bool = SettingsField(False, title="Enable plugin")
     product_types: list[str] = SettingsField(
         default_factory=list, title="Product types"
@@ -209,9 +201,6 @@ class IntegrateFFmpegReviewModel(BaseSettingsModel):
     )
     task_types: list[str] = SettingsField(default_factory=list, title="Task types")
     task_names: list[str] = SettingsField(default_factory=list, title="Task names")
-    product_names: list[str] = SettingsField(
-        default_factory=list, title="Product names"
-    )
     profiles: list[FFmpegProfileModel] = SettingsField(
         default_factory=list,
         title="Profiles (deliverables)",
@@ -224,6 +213,5 @@ DEFAULT_FFMPEG_REVIEW_SETTINGS = {
     "hosts": [],
     "task_types": [],
     "task_names": [],
-    "product_names": [],
     "profiles": [],
 }

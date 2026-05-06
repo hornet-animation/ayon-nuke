@@ -2,21 +2,103 @@ import os
 import re
 import copy
 import subprocess
-import threading
-import time
 
 import nuke
 import pyblish.api
+from qtpy import QtCore, QtWidgets
 from ayon_core.pipeline.publish import OptionalPyblishPluginMixin
 
 from ayon_nuke.startup.ffmpegbuilder import FFMpegBuilder
 
 import ayon_nuke
+
 _ADDON_ROOT = os.path.dirname(ayon_nuke.__file__)
-DEFAULT_FONT = os.path.join(_ADDON_ROOT, "resources", "fonts", "Inter-Variable.ttf")
+DEFAULT_FONT = os.path.join(
+    _ADDON_ROOT, "resources", "fonts", "Inter-Variable.ttf"
+)
 
 
-class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMixin):
+class _FFmpegDialog(QtWidgets.QDialog):
+    """Non-modal dialog showing ffmpeg output with a 5-line rolling window."""
+
+    line_received = QtCore.Signal(str)
+    job_started = QtCore.Signal(int, str)
+    all_done = QtCore.Signal()
+    cancelled = QtCore.Signal()
+
+    def __init__(self, total_jobs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("FFmpeg Review")
+        self.setModal(False)
+        self.resize(600, 150)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+
+        self.status_label = QtWidgets.QLabel(
+            "Encoding deliverable 0/{}".format(total_jobs)
+        )
+        layout.addWidget(self.status_label)
+
+        self.text = QtWidgets.QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setMaximumBlockCount(5)
+        self.text.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        layout.addWidget(self.text)
+
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        layout.addWidget(self.cancel_btn)
+
+        self._cancelled = False
+        self._total_jobs = total_jobs
+
+        self.line_received.connect(self._on_line)
+        self.job_started.connect(self._on_job_started)
+        self.all_done.connect(self.close)
+
+    def _on_cancel(self):
+        if self._cancelled:
+            return
+        self._cancelled = True
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText("Cancelling…")
+        self.cancelled.emit()
+
+    def closeEvent(self, event):
+        # Closing the window via [X] must behave like Cancel, otherwise the
+        # ffmpeg subprocess keeps running orphaned after the dialog is gone.
+        if not self._cancelled:
+            self._on_cancel()
+        super().closeEvent(event)
+
+    def _on_line(self, line):
+        self.text.appendPlainText(line)
+
+    def _on_job_started(self, idx, name):
+        self.status_label.setText(
+            "Encoding deliverable {}/{} — {}".format(
+                idx, self._total_jobs, name
+            )
+        )
+
+    def append_line(self, line):
+        self.line_received.emit(line)
+
+    def start_job(self, idx, name):
+        self.job_started.emit(idx, name)
+
+    def finish(self):
+        self.all_done.emit()
+
+    def is_cancelled(self):
+        return self._cancelled
+
+
+class IntegrateFFmpegReview(
+    pyblish.api.InstancePlugin, OptionalPyblishPluginMixin
+):
     """Generate review movies from published image sequences via ffmpeg.
 
     Each profile is a self-contained deliverable (codec + output colorspace
@@ -46,14 +128,15 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
 
         criteria = {
             "product_types": instance.data.get("productType", ""),
-            "hosts":         instance.context.data.get("hostName", ""),
-            "task_types":    instance.data.get("taskType", ""),
-            "task_names":    instance.data.get("task", ""),
-            "product_names": instance.data.get("productName", ""),
+            "hosts": instance.context.data.get("hostName", ""),
+            "task_types": instance.data.get("taskType", ""),
+            "task_names": instance.data.get("task", ""),
         }
         self.log.debug("Filter criteria: %s", criteria)
         if not _filters_match(plugin_settings, criteria):
-            self.log.info("Instance does not match plugin-level filters, skipping")
+            self.log.info(
+                "Instance does not match plugin-level filters, skipping"
+            )
             return
 
         publish_dir = instance.data.get("publishDir")
@@ -74,41 +157,64 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
 
         anatomy_data = instance.data.get("anatomyData", {})
         text_values = {
-            "shot":    anatomy_data.get("folder", {}).get("name"),
-            "name":    instance.data.get("name"),
+            "shot": anatomy_data.get("folder", {}).get("name"),
+            "name": instance.data.get("name"),
             "version": anatomy_data.get("version"),
             "project": (instance.data.get("project") or {}).get("name"),
         }
 
-        fps              = instance.data.get("fps") or instance.context.data.get("fps", 24)
+        fps = instance.data.get("fps") or instance.context.data.get("fps", 24)
         input_colorspace = instance.data.get("colorspace")
 
-        for profile in profiles:
-            if not _filters_match(profile, criteria):
-                self.log.debug(
-                    "Profile codec=%r skipped by per-profile filters",
-                    (profile.get("codec") or {}).get("name"),
-                )
-                continue
+        # Count matching profiles for dialog
+        matching_profiles = [
+            p for p in profiles if _filters_match(p, criteria)
+        ]
+        total_jobs = len(matching_profiles)
 
-            self.log.info("Running profile: %s", (profile.get("codec") or {}).get("name"))
-            self._run_profile(
-                instance,
-                codec=profile["codec"],
-                colorspace=profile.get("colorspace") or {},
-                burnin=profile["burnin"],
-                input_pattern=input_pattern,
-                start_frame=start_frame,
-                publish_dir=publish_dir,
-                fps=fps,
-                input_colorspace=input_colorspace,
-                text_values=text_values,
-            )
+        dialog = None
+        if nuke.env.get("gui") and total_jobs > 0:
+            app = QtWidgets.QApplication.instance()
+            parent = app.activeWindow() if app else None
+            dialog = _FFmpegDialog(total_jobs, parent=parent)
+            dialog.show()
+
+        try:
+            for idx, profile in enumerate(matching_profiles, start=1):
+                profile_name = profile.get("name") or "unnamed"
+                self.log.info("Running profile: %s", profile_name)
+
+                if dialog is not None:
+                    dialog.start_job(idx, profile_name)
+                    if dialog.is_cancelled():
+                        raise RuntimeError("FFmpeg review cancelled by user")
+
+                self._run_profile(
+                    instance,
+                    profile_name=profile_name,
+                    codec=profile["codec"],
+                    colorspace=profile.get("colorspace") or {},
+                    burnin=profile["burnin"],
+                    input_pattern=input_pattern,
+                    start_frame=start_frame,
+                    publish_dir=publish_dir,
+                    fps=fps,
+                    input_colorspace=input_colorspace,
+                    text_values=text_values,
+                    dialog=dialog,
+                )
+        finally:
+            if dialog is not None:
+                if dialog.is_cancelled():
+                    dialog.close()
+                else:
+                    dialog.finish()
 
     def _run_profile(
         self,
         instance,
         *,
+        profile_name,
         codec,
         colorspace,
         burnin,
@@ -118,38 +224,36 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
         fps,
         input_colorspace,
         text_values,
+        dialog=None,
     ):
         output_colorspace = colorspace.get("output") or None
 
-        # Codec name is appended so multi-profile deliverables don't collide.
-        seq_basename = f"{_derive_seq_basename(input_pattern)}_{codec['name']}"
-        output_path  = os.path.join(
+        # Profile name is appended so multi-profile deliverables don't collide.
+        seq_basename = f"{_derive_seq_basename(input_pattern)}_{profile_name}"
+        output_path = os.path.join(
             publish_dir, f"{seq_basename}.{codec['movie_ext']}"
         )
 
         globals_config = {
-            "width":     codec["width"],
-            "height":    codec["height"],
-            "fit":       codec["fit"],
+            "width": codec["width"],
+            "height": codec["height"],
+            "fit": codec["fit"],
             "framerate": fps,
         }
 
         codec_config = {
-            "codec":      codec["codec"],
-            "name":       codec["name"],
-            "movie_ext":  codec["movie_ext"],
-            "pix_fmt":    codec["pix_fmt"]    or None,
-            "profile":    codec["profile"]    or None,
-            "crf":        codec["crf"]        or None,
-            "bitrate":    codec["bitrate"]    or None,
+            "codec": codec["codec"],
+            "name": profile_name,
+            "movie_ext": codec["movie_ext"],
+            "pix_fmt": codec["pix_fmt"] or None,
+            "profile": codec["profile"] or None,
             "extra_args": codec.get("extra_args") or None,
         }
 
-        profile_config = _burnin_to_dict(burnin) if burnin["enabled"] else {}
+        profile_config = _burnin_to_dict(burnin)
 
         self.log.info(
-            f"Running ffmpeg review | codec={codec['name']} "
-            f"burnin={burnin['enabled']} "
+            f"Running ffmpeg review | profile={profile_name} "
             f"colorspace={input_colorspace}->{output_colorspace} "
             f"input={input_pattern} start_frame={start_frame}"
         )
@@ -170,99 +274,130 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
             if nuke.env.get("gui"):
                 self.log.debug("Running with Nuke GUI dialog")
                 self._run_with_dialog(
-                    builder.build(), builder.get_env(), codec["name"],
+                    builder.build(),
+                    builder.get_env(),
+                    profile_name,
+                    dialog,
                 )
             else:
                 self.log.debug("Running ffmpeg headless")
                 builder.run(check=True)
         except subprocess.CalledProcessError as exc:
             self.log.error(
-                f"FFMpegBuilder failed for codec={codec['name']} "
+                f"FFMpegBuilder failed for profile={profile_name} "
                 f"(returncode={exc.returncode})"
             )
             return
 
-        instance.data["representations"].append({
-            "name":       codec["name"],
-            "ext":        codec["movie_ext"],
-            "files":      os.path.basename(builder.output_path),
-            "stagingDir": os.path.dirname(builder.output_path),
-            "tags":       ["review"],
-            "frameStart": instance.data.get("frameStart"),
-            "frameEnd":   instance.data.get("frameEnd"),
-        })
+        instance.data["representations"].append(
+            {
+                "name": profile_name,
+                "ext": codec["movie_ext"],
+                "files": os.path.basename(builder.output_path),
+                "stagingDir": os.path.dirname(builder.output_path),
+                "tags": ["review"],
+                "frameStart": instance.data.get("frameStart"),
+                "frameEnd": instance.data.get("frameEnd"),
+            }
+        )
         self.log.info(f"Added review representation: {builder.output_path}")
 
-    def _run_with_dialog(self, cmd, env, codec_name):
-        """Run ffmpeg under a cancellable Nuke ProgressTask."""
-        # -progress emits newline-delimited key=value lines; -nostats kills
-        # the \r-overwriting line that would block Python's line iteration.
+    def _run_with_dialog(self, cmd, env, profile_name, dialog):
+        """Run ffmpeg under a cancellable Qt dialog using QProcess.
+
+        Output is streamed via ``readyReadStandardOutput``; a nested
+        ``QEventLoop`` blocks the caller while still pumping events, so the
+        Cancel button and window-close stay live without threads.
+        """
+        # -progress emits newline-delimited key=value lines on stderr;
+        # -nostats kills the \r-overwriting status line.
         cmd = cmd[:-1] + ["-progress", "pipe:2", "-nostats", cmd[-1]]
+        program, args = cmd[0], cmd[1:]
 
-        task = nuke.ProgressTask(f"FFmpeg Review — {codec_name}")
-        task.setMessage("Starting ffmpeg…")
+        qenv = QtCore.QProcessEnvironment()
+        for k, v in env.items():
+            qenv.insert(k, v)
 
-        proc = subprocess.Popen(
-            cmd, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
+        proc = QtCore.QProcess()
+        proc.setProcessEnvironment(qenv)
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 
         output_lines = []
 
-        def _reader():
-            for raw in proc.stdout:
-                line = raw.rstrip()
-                if not line:
-                    continue
-                output_lines.append(line)
-                task.setMessage(line[-80:])
-                if task.isCancelled():
-                    break
-            proc.stdout.close()
+        def _emit(text):
+            text = text.rstrip()
+            if not text:
+                return
+            output_lines.append(text)
+            if dialog is not None:
+                dialog.append_line(text)
 
-        reader_thread = threading.Thread(target=_reader, daemon=True)
-        reader_thread.start()
+        def _drain():
+            while proc.canReadLine():
+                _emit(bytes(proc.readLine()).decode("utf-8", errors="replace"))
 
-        while reader_thread.is_alive():
-            if task.isCancelled():
-                proc.terminate()
-                time.sleep(0.5)
-                if proc.poll() is None:
-                    proc.kill()
-                break
-            time.sleep(0.1)
+        loop = QtCore.QEventLoop()
+        proc.readyReadStandardOutput.connect(_drain)
+        proc.finished.connect(lambda *_: loop.quit())
+        proc.errorOccurred.connect(lambda *_: loop.quit())
+        if dialog is not None:
+            dialog.cancelled.connect(proc.kill)
 
-        reader_thread.join()
-        returncode = proc.wait()
-        del task
+        try:
+            proc.start(program, args)
+            if not proc.waitForStarted(5000):
+                raise subprocess.CalledProcessError(
+                    1, cmd, output=str(proc.errorString())
+                )
 
-        if returncode != 0:
-            self.log.error(
-                f"FFMpegBuilder failed for codec={codec_name} "
-                f"(returncode={returncode})\n"
-                + "\n".join(output_lines)
-            )
-            raise subprocess.CalledProcessError(returncode, cmd)
+            loop.exec_()
+            _drain()
+            _emit(bytes(proc.readAll()).decode("utf-8", errors="replace"))
+
+            if dialog is not None and dialog.is_cancelled():
+                raise RuntimeError("FFmpeg review cancelled by user")
+
+            rc = proc.exitCode()
+            if (
+                proc.exitStatus() != QtCore.QProcess.NormalExit
+                or rc != 0
+            ):
+                self.log.error(
+                    f"FFMpegBuilder failed for profile={profile_name} "
+                    f"(returncode={rc})\n" + "\n".join(output_lines)
+                )
+                raise subprocess.CalledProcessError(rc, cmd)
+        finally:
+            if dialog is not None:
+                try:
+                    dialog.cancelled.disconnect(proc.kill)
+                except (TypeError, RuntimeError):
+                    pass
 
     def _resolve_input_pattern(self, instance):
         """Return ``(pattern_path, start_frame)`` resolved from anatomy."""
         repz = instance.data.get("representations", [])
-        ext  = instance.data.get("ext")
-        self.log.debug("Resolving input pattern for ext=%s, representations=%d", ext, len(repz))
+        ext = instance.data.get("ext")
+        self.log.debug(
+            "Resolving input pattern for ext=%s, representations=%d",
+            ext,
+            len(repz),
+        )
 
         for rep in repz:
             if rep.get("ext") != ext:
-                self.log.debug("Skipping representation ext=%s", rep.get("ext"))
+                self.log.debug(
+                    "Skipping representation ext=%s", rep.get("ext")
+                )
                 continue
 
-            anatomy       = instance.context.data["anatomy"]
+            anatomy = instance.context.data["anatomy"]
             template_data = copy.deepcopy(instance.data["anatomyData"])
             template_data["representation"] = rep["name"]
-            template_data["ext"]            = rep["ext"]
+            template_data["ext"] = rep["ext"]
 
             publish_template = anatomy.get_template_item("publish", "render")
-            path_template    = publish_template["path"]
+            path_template = publish_template["path"]
 
             frame_start = instance.data["frameStart"]
             template_data["frame"] = frame_start
@@ -270,10 +405,16 @@ class IntegrateFFmpegReview(pyblish.api.InstancePlugin, OptionalPyblishPluginMix
             self.log.debug("First frame path: %s", first_frame_path)
 
             pattern = _pattern_from_first_frame(first_frame_path, frame_start)
-            self.log.info("Resolved input pattern: %s (start_frame=%s)", pattern, frame_start)
+            self.log.info(
+                "Resolved input pattern: %s (start_frame=%s)",
+                pattern,
+                frame_start,
+            )
             return pattern, frame_start
 
-        self.log.warning("Could not resolve input path for ffmpeg review, skipping")
+        self.log.warning(
+            "Could not resolve input path for ffmpeg review, skipping"
+        )
         return None, None
 
 
@@ -289,11 +430,13 @@ def _filters_match(settings, criteria):
 def _pattern_from_first_frame(path, frame):
     """``render_v001.0001.exr`` (frame=1) → ``render_v001.%04d.exr``."""
     dirname = os.path.dirname(path)
-    fname   = os.path.basename(path)
+    fname = os.path.basename(path)
     for m in reversed(list(re.finditer(r"\d+", fname))):
         digits = m.group()
         if int(digits) == int(frame):
-            new_fname = f"{fname[:m.start()]}%0{len(digits)}d{fname[m.end():]}"
+            new_fname = (
+                f"{fname[: m.start()]}%0{len(digits)}d{fname[m.end() :]}"
+            )
             return os.path.join(dirname, new_fname)
     return path
 
@@ -312,24 +455,25 @@ def _resolve_font(font):
 
 def _burnin_to_dict(burnin):
     """AYON burnin settings → ``FFMpegBuilder`` profile_config."""
+
     def box(m):
         return [m["x1"], m["y1"], m["x2"], m["y2"]]
 
     def color(c):
-        return list(c) if c is not None else [0.8, 0.8, 0.8, 1.0]
+        return list(c) if c is not None else [1.0, 1.0, 1.0, 1.0]
 
     return {
-        "font":       _resolve_font(burnin.get("font", "")),
-        "font_size":  burnin.get("font_size", 0.02),
-        "font_color": color(burnin.get("font_color")),
-        "cropmask":   burnin.get("cropmask", {"enable": False}),
+        "cropmask": burnin.get("cropmask", {"enable": False}),
         "text_elements": {
             el["name"]: {
-                **{k: v for k, v in el.items()
-                   if k not in ("name", "box", "font_color")},
-                "box":        box(el["box"]),
+                **{
+                    k: v
+                    for k, v in el.items()
+                    if k not in ("name", "box", "font_color")
+                },
+                "box": box(el["box"]),
                 "font_color": color(el.get("font_color")),
-                "font":       _resolve_font(el.get("font", "")),
+                "font": _resolve_font(el.get("font", "")),
             }
             for el in burnin.get("text_elements", [])
         },
