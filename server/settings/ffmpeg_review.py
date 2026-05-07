@@ -46,6 +46,19 @@ def profile_enum():
     ]
 
 
+def delivery_enum():
+    return [
+        {"value": "none", "label": "None (no tags)"},
+        {"value": "rec709", "label": "Rec.709 (HD video)"},
+        {"value": "srgb", "label": "sRGB (web / desktop)"},
+        {"value": "rec2020_sdr", "label": "Rec.2020 SDR"},
+        {"value": "rec2020_pq", "label": "Rec.2020 PQ (HDR)"},
+        {"value": "rec2020_hlg", "label": "Rec.2020 HLG (HDR)"},
+        {"value": "p3_d65", "label": "P3-D65"},
+        {"value": "linear", "label": "Linear (untagged transfer)"},
+    ]
+
+
 def text_element_name_enum():
     return [
         {"value": "shot", "label": "Shot"},
@@ -96,6 +109,16 @@ class FFmpegCodecModel(BaseSettingsModel):
 class FFmpegColorspaceModel(BaseSettingsModel):
     _layout = "compact"
     output: str = SettingsField("", title="Output OCIO colorspace")
+    delivery: str = SettingsField(
+        "none",
+        title="Delivery tagging",
+        enum_resolver=delivery_enum,
+        description=(
+            "Container metadata describing the encoded bytes — independent "
+            "of the OCIO config name, which can vary per project. Drives "
+            "color_range / color_primaries / color_trc / colorspace tags."
+        ),
+    )
 
 
 class FFmpegCropmaskModel(BaseSettingsModel):
@@ -191,6 +214,15 @@ class FFmpegProfileModel(BaseSettingsModel):
 class IntegrateFFmpegReviewModel(BaseSettingsModel):
     _isGroup = True
     enabled: bool = SettingsField(False, title="Enable plugin")
+    create_read_node: bool = SettingsField(
+        True,
+        title="Create Read node for each review",
+        description=(
+            "After each profile encodes, drop a Read node into the Nuke "
+            "script pointing at the .mov with its output colorspace tagged. "
+            "GUI mode only."
+        ),
+    )
     product_types: list[str] = SettingsField(
         default_factory=list, title="Product types"
     )
@@ -209,6 +241,7 @@ class IntegrateFFmpegReviewModel(BaseSettingsModel):
 
 DEFAULT_FFMPEG_REVIEW_SETTINGS = {
     "enabled": False,
+    "create_read_node": True,
     "product_types": [],
     "hosts": [],
     "task_types": [],

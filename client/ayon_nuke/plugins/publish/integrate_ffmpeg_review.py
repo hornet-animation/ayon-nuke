@@ -19,7 +19,7 @@ DEFAULT_FONT = os.path.join(
 
 
 class _FFmpegDialog(QtWidgets.QDialog):
-    """Non-modal dialog showing ffmpeg output with a 5-line rolling window."""
+    """Non-modal dialog showing ffmpeg output in a scrollable ~5-line viewport."""
 
     line_received = QtCore.Signal(str)
     job_started = QtCore.Signal(int, str)
@@ -30,7 +30,7 @@ class _FFmpegDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("FFmpeg Review")
         self.setModal(False)
-        self.resize(600, 150)
+        self.resize(700, 240)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -43,8 +43,12 @@ class _FFmpegDialog(QtWidgets.QDialog):
 
         self.text = QtWidgets.QPlainTextEdit()
         self.text.setReadOnly(True)
-        self.text.setMaximumBlockCount(5)
+        self.text.setMaximumBlockCount(10000)
         self.text.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        fm = self.text.fontMetrics()
+        self.text.setMinimumHeight(
+            fm.lineSpacing() * 5 + 2 * self.text.frameWidth() + 4
+        )
         layout.addWidget(self.text)
 
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -67,8 +71,7 @@ class _FFmpegDialog(QtWidgets.QDialog):
         self.cancelled.emit()
 
     def closeEvent(self, event):
-        # Closing the window via [X] must behave like Cancel, otherwise the
-        # ffmpeg subprocess keeps running orphaned after the dialog is gone.
+        # pass X button close to cancel handler to avoid memory leak
         if not self._cancelled:
             self._on_cancel()
         super().closeEvent(event)
@@ -165,6 +168,10 @@ class IntegrateFFmpegReview(
 
         fps = instance.data.get("fps") or instance.context.data.get("fps", 24)
         input_colorspace = instance.data.get("colorspace")
+        create_read_node = (
+            plugin_settings.get("create_read_node", False)
+            and nuke.env.get("gui")
+        )
 
         # Count matching profiles for dialog
         matching_profiles = [
@@ -202,6 +209,7 @@ class IntegrateFFmpegReview(
                     input_colorspace=input_colorspace,
                     text_values=text_values,
                     dialog=dialog,
+                    create_read_node=create_read_node,
                 )
         finally:
             if dialog is not None:
@@ -225,8 +233,10 @@ class IntegrateFFmpegReview(
         input_colorspace,
         text_values,
         dialog=None,
+        create_read_node=False,
     ):
         output_colorspace = colorspace.get("output") or None
+        delivery = colorspace.get("delivery") or None
 
         # Profile name is appended so multi-profile deliverables don't collide.
         seq_basename = f"{_derive_seq_basename(input_pattern)}_{profile_name}"
@@ -266,6 +276,7 @@ class IntegrateFFmpegReview(
                 input_colorspace=input_colorspace,
                 output_colorspace=output_colorspace,
                 ocio_config=None,
+                delivery=delivery,
             )
             .text(**text_values)
         )
@@ -287,7 +298,7 @@ class IntegrateFFmpegReview(
                 f"FFMpegBuilder failed for profile={profile_name} "
                 f"(returncode={exc.returncode})"
             )
-            return
+            raise Exception(f"OCIO config not set or found $OCIO set to {os.environ.get('OCIO')}")
 
         instance.data["representations"].append(
             {
@@ -301,6 +312,27 @@ class IntegrateFFmpegReview(
             }
         )
         self.log.info(f"Added review representation: {builder.output_path}")
+
+        if create_read_node:
+            self._create_read_node(
+                builder.output_path, profile_name, output_colorspace
+            )
+
+    def _create_read_node(self, output_path, profile_name, colorspace):
+        try:
+            read = nuke.nodes.Read(
+                file=output_path.replace("\\", "/"),
+                name=f"Review_{profile_name}",
+            )
+            if colorspace:
+                read["colorspace"].setValue(colorspace)
+            self.log.info(
+                f"Created Read node {read.name()} -> {output_path}"
+            )
+        except Exception as exc:
+            self.log.warning(
+                f"Could not create Read node for profile={profile_name}: {exc}"
+            )
 
     def _run_with_dialog(self, cmd, env, profile_name, dialog):
         """Run ffmpeg under a cancellable Qt dialog using QProcess.
@@ -332,12 +364,12 @@ class IntegrateFFmpegReview(
             if dialog is not None:
                 dialog.append_line(text)
 
-        def _drain():
+        def _on_lines():
             while proc.canReadLine():
                 _emit(bytes(proc.readLine()).decode("utf-8", errors="replace"))
 
         loop = QtCore.QEventLoop()
-        proc.readyReadStandardOutput.connect(_drain)
+        proc.readyReadStandardOutput.connect(_on_lines)
         proc.finished.connect(lambda *_: loop.quit())
         proc.errorOccurred.connect(lambda *_: loop.quit())
         if dialog is not None:
@@ -351,7 +383,6 @@ class IntegrateFFmpegReview(
                 )
 
             loop.exec_()
-            _drain()
             _emit(bytes(proc.readAll()).decode("utf-8", errors="replace"))
 
             if dialog is not None and dialog.is_cancelled():
