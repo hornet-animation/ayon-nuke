@@ -1,21 +1,18 @@
 import os
 import re
-import copy
 import subprocess
+import tempfile
 
 import nuke
 import pyblish.api
 from qtpy import QtCore, QtWidgets
+from ayon_core import resources
 from ayon_core.pipeline.publish import OptionalPyblishPluginMixin
 
 from ayon_nuke.startup.ffmpegbuilder import FFMpegBuilder
 
-import ayon_nuke
 
-_ADDON_ROOT = os.path.dirname(ayon_nuke.__file__)
-DEFAULT_FONT = os.path.join(
-    _ADDON_ROOT, "resources", "fonts", "Inter-Variable.ttf"
-)
+DEFAULT_FONT = resources.get_liberation_font_path()
 
 
 class _FFmpegDialog(QtWidgets.QDialog):
@@ -86,20 +83,11 @@ class _FFmpegDialog(QtWidgets.QDialog):
             )
         )
 
-    def append_line(self, line):
-        self.line_received.emit(line)
-
-    def start_job(self, idx, name):
-        self.job_started.emit(idx, name)
-
-    def finish(self):
-        self.all_done.emit()
-
     def is_cancelled(self):
         return self._cancelled
 
 
-class IntegrateFFmpegReview(
+class ExtractFFmpegReview(
     pyblish.api.InstancePlugin, OptionalPyblishPluginMixin
 ):
     """Generate review movies from published image sequences via ffmpeg.
@@ -109,20 +97,35 @@ class IntegrateFFmpegReview(
     per-profile filters runs as its own ffmpeg invocation.
     """
 
-    label = "Integrate FFmpeg Review"
-    order = pyblish.api.IntegratorOrder + 4.2
+    label = "Extract FFmpeg Review"
+    # Runs in extract phase so the appended representation passes through
+    # IntegrateAsset (at IntegratorOrder + 0.0) and lands in the AYON DB.
+    order = pyblish.api.ExtractorOrder + 0.49
     families = ["render", "prerender"]
     hosts = ["nuke"]
+    targets = ["local", "farm"]
     settings_category = "nuke"
     optional = True
 
     def process(self, instance):
+        creator_attrs = instance.data.get("creator_attributes") or {}
+        if not creator_attrs.get("review", True):
+            self.log.info("Review media disabled on instance, skipping")
+            return
+        # Defer to the farm-side pyblish run when the user asked for review
+        # on farm; that run has "farm" in registered_targets.
+        if (
+            creator_attrs.get("hornet_review_use_farm")
+            and "farm" not in pyblish.api.registered_targets()
+        ):
+            self.log.info("Deferring review media to farm publish")
+            return
         self.log.info("Processing instance: %s", instance.data.get("name"))
         project_settings = instance.context.data["project_settings"]
         plugin_settings = (
             project_settings.get("nuke", {})
             .get("publish", {})
-            .get("IntegrateFFmpegReview", {})
+            .get("ExtractFFmpegReview", {})
         )
 
         if not plugin_settings.get("enabled", False):
@@ -141,12 +144,6 @@ class IntegrateFFmpegReview(
                 "Instance does not match plugin-level filters, skipping"
             )
             return
-
-        publish_dir = instance.data.get("publishDir")
-        if not publish_dir:
-            self.log.warning("publishDir not found on instance, skipping")
-            return
-        self.log.debug("publishDir: %s", publish_dir)
 
         profiles = plugin_settings.get("profiles", [])
         if not profiles:
@@ -192,7 +189,7 @@ class IntegrateFFmpegReview(
                 self.log.info("Running profile: %s", profile_name)
 
                 if dialog is not None:
-                    dialog.start_job(idx, profile_name)
+                    dialog.job_started.emit(idx, profile_name)
                     if dialog.is_cancelled():
                         raise RuntimeError("FFmpeg review cancelled by user")
 
@@ -201,10 +198,10 @@ class IntegrateFFmpegReview(
                     profile_name=profile_name,
                     codec=profile["codec"],
                     colorspace=profile.get("colorspace") or {},
-                    burnin=profile["burnin"],
+                    burnin_config=profile["burnin"],
+                    do_burnin=creator_attrs.get("review_burnin", True),
                     input_pattern=input_pattern,
                     start_frame=start_frame,
-                    publish_dir=publish_dir,
                     fps=fps,
                     input_colorspace=input_colorspace,
                     text_values=text_values,
@@ -216,7 +213,7 @@ class IntegrateFFmpegReview(
                 if dialog.is_cancelled():
                     dialog.close()
                 else:
-                    dialog.finish()
+                    dialog.all_done.emit()
 
     def _run_profile(
         self,
@@ -225,10 +222,10 @@ class IntegrateFFmpegReview(
         profile_name,
         codec,
         colorspace,
-        burnin,
+        burnin_config,
+        do_burnin,
         input_pattern,
         start_frame,
-        publish_dir,
         fps,
         input_colorspace,
         text_values,
@@ -238,10 +235,13 @@ class IntegrateFFmpegReview(
         output_colorspace = colorspace.get("output") or None
         delivery = colorspace.get("delivery") or None
 
-        # Profile name is appended so multi-profile deliverables don't collide.
-        seq_basename = f"{_derive_seq_basename(input_pattern)}_{profile_name}"
+        # Write to a per-profile temp dir so IntegrateAsset transfers the
+        # output to its template-driven publish location and registers it.
+        staging = tempfile.mkdtemp(prefix=f"review_{profile_name}_")
+        fname = os.path.splitext(os.path.basename(input_pattern))[0]
+        seq_basename = re.sub(r"[._-]?%\d*d$", "", fname) + f"_{profile_name}"
         output_path = os.path.join(
-            publish_dir, f"{seq_basename}.{codec['movie_ext']}"
+            staging, f"{seq_basename}.{codec['movie_ext']}"
         )
 
         globals_config = {
@@ -260,7 +260,28 @@ class IntegrateFFmpegReview(
             "extra_args": codec.get("extra_args") or None,
         }
 
-        profile_config = _burnin_to_dict(burnin)
+        profile_config = {
+            "cropmask": burnin_config.get("cropmask", {"enable": False}),
+            "text_elements": {} if not do_burnin else {
+                el["name"]: {
+                    **{
+                        k: v
+                        for k, v in el.items()
+                        if k not in ("name", "box", "font_color")
+                    },
+                    "box": [
+                        el["box"]["x1"], el["box"]["y1"],
+                        el["box"]["x2"], el["box"]["y2"],
+                    ],
+                    "font_color": (
+                        list(el["font_color"]) if el.get("font_color") is not None
+                        else [1.0, 1.0, 1.0, 1.0]
+                    ),
+                    "font": DEFAULT_FONT,
+                }
+                for el in burnin_config.get("text_elements", [])
+            },
+        }
 
         self.log.info(
             f"Running ffmpeg review | profile={profile_name} "
@@ -275,21 +296,22 @@ class IntegrateFFmpegReview(
             .color(
                 input_colorspace=input_colorspace,
                 output_colorspace=output_colorspace,
-                ocio_config=None,
                 delivery=delivery,
             )
             .text(**text_values)
         )
 
+        self.log.info(
+            "ffmpeg cmd | profile=%s\n  text_values=%s\n  cmd=%s",
+            profile_name,
+            text_values,
+            builder.build_string(),
+        )
+
         try:
             if nuke.env.get("gui"):
                 self.log.debug("Running with Nuke GUI dialog")
-                self._run_with_dialog(
-                    builder.build(),
-                    builder.get_env(),
-                    profile_name,
-                    dialog,
-                )
+                self._run_with_dialog(builder.build(), profile_name, dialog)
             else:
                 self.log.debug("Running ffmpeg headless")
                 builder.run(check=True)
@@ -298,7 +320,7 @@ class IntegrateFFmpegReview(
                 f"FFMpegBuilder failed for profile={profile_name} "
                 f"(returncode={exc.returncode})"
             )
-            raise Exception(f"OCIO config not set or found $OCIO set to {os.environ.get('OCIO')}")
+            raise
 
         instance.data["representations"].append(
             {
@@ -314,27 +336,22 @@ class IntegrateFFmpegReview(
         self.log.info(f"Added review representation: {builder.output_path}")
 
         if create_read_node:
-            self._create_read_node(
-                builder.output_path, profile_name, output_colorspace
-            )
+            try:
+                read = nuke.nodes.Read(
+                    file=builder.output_path.replace("\\", "/"),
+                    name=f"Review_{profile_name}",
+                )
+                if output_colorspace:
+                    read["colorspace"].setValue(output_colorspace)
+                self.log.info(
+                    f"Created Read node {read.name()} -> {builder.output_path}"
+                )
+            except Exception as exc:
+                self.log.warning(
+                    f"Could not create Read node for profile={profile_name}: {exc}"
+                )
 
-    def _create_read_node(self, output_path, profile_name, colorspace):
-        try:
-            read = nuke.nodes.Read(
-                file=output_path.replace("\\", "/"),
-                name=f"Review_{profile_name}",
-            )
-            if colorspace:
-                read["colorspace"].setValue(colorspace)
-            self.log.info(
-                f"Created Read node {read.name()} -> {output_path}"
-            )
-        except Exception as exc:
-            self.log.warning(
-                f"Could not create Read node for profile={profile_name}: {exc}"
-            )
-
-    def _run_with_dialog(self, cmd, env, profile_name, dialog):
+    def _run_with_dialog(self, cmd, profile_name, dialog):
         """Run ffmpeg under a cancellable Qt dialog using QProcess.
 
         Output is streamed via ``readyReadStandardOutput``; a nested
@@ -346,12 +363,7 @@ class IntegrateFFmpegReview(
         cmd = cmd[:-1] + ["-progress", "pipe:2", "-nostats", cmd[-1]]
         program, args = cmd[0], cmd[1:]
 
-        qenv = QtCore.QProcessEnvironment()
-        for k, v in env.items():
-            qenv.insert(k, v)
-
         proc = QtCore.QProcess()
-        proc.setProcessEnvironment(qenv)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 
         output_lines = []
@@ -362,7 +374,7 @@ class IntegrateFFmpegReview(
                 return
             output_lines.append(text)
             if dialog is not None:
-                dialog.append_line(text)
+                dialog.line_received.emit(text)
 
         def _on_lines():
             while proc.canReadLine():
@@ -406,40 +418,32 @@ class IntegrateFFmpegReview(
                     pass
 
     def _resolve_input_pattern(self, instance):
-        """Return ``(pattern_path, start_frame)`` resolved from anatomy."""
-        repz = instance.data.get("representations", [])
+        """Return ``(pattern_path, start_frame)`` reading the source frames
+        from the representation's stagingDir — i.e., the write node's output
+        folder, where the renders actually live during extract.
+        """
         ext = instance.data.get("ext")
-        self.log.debug(
-            "Resolving input pattern for ext=%s, representations=%d",
-            ext,
-            len(repz),
-        )
-
-        for rep in repz:
+        frame_start = int(instance.data["frameStart"])
+        for rep in instance.data.get("representations", []):
             if rep.get("ext") != ext:
-                self.log.debug(
-                    "Skipping representation ext=%s", rep.get("ext")
-                )
                 continue
-
-            anatomy = instance.context.data["anatomy"]
-            template_data = copy.deepcopy(instance.data["anatomyData"])
-            template_data["representation"] = rep["name"]
-            template_data["ext"] = rep["ext"]
-
-            publish_template = anatomy.get_template_item("publish", "render")
-            path_template = publish_template["path"]
-
-            frame_start = instance.data["frameStart"]
-            template_data["frame"] = frame_start
-            first_frame_path = str(path_template.format_strict(template_data))
-            self.log.debug("First frame path: %s", first_frame_path)
-
-            pattern = _pattern_from_first_frame(first_frame_path, frame_start)
+            staging = rep.get("stagingDir")
+            files = rep.get("files")
+            first = files[0] if isinstance(files, (list, tuple)) else files
+            if not staging or not first:
+                continue
+            # ``render_v001.0001.exr`` (frame=1001) → ``render_v001.%04d.exr``
+            pattern = os.path.join(staging, first)
+            for m in reversed(list(re.finditer(r"\d+", first))):
+                if int(m.group()) == frame_start:
+                    pattern = os.path.join(
+                        staging,
+                        f"{first[:m.start()]}%0{len(m.group())}d{first[m.end():]}",
+                    )
+                    break
             self.log.info(
                 "Resolved input pattern: %s (start_frame=%s)",
-                pattern,
-                frame_start,
+                pattern, frame_start,
             )
             return pattern, frame_start
 
@@ -456,56 +460,3 @@ def _filters_match(settings, criteria):
         if filt and value not in filt:
             return False
     return True
-
-
-def _pattern_from_first_frame(path, frame):
-    """``render_v001.0001.exr`` (frame=1) → ``render_v001.%04d.exr``."""
-    dirname = os.path.dirname(path)
-    fname = os.path.basename(path)
-    for m in reversed(list(re.finditer(r"\d+", fname))):
-        digits = m.group()
-        if int(digits) == int(frame):
-            new_fname = (
-                f"{fname[: m.start()]}%0{len(digits)}d{fname[m.end() :]}"
-            )
-            return os.path.join(dirname, new_fname)
-    return path
-
-
-def _derive_seq_basename(pattern_path):
-    """``/a/b/render_v001.%04d.exr`` → ``render_v001``."""
-    fname = os.path.splitext(os.path.basename(pattern_path))[0]
-    return re.sub(r"[._-]?%\d*d$", "", fname)
-
-
-def _resolve_font(font):
-    if font and os.path.isfile(font):
-        return font
-    return DEFAULT_FONT
-
-
-def _burnin_to_dict(burnin):
-    """AYON burnin settings → ``FFMpegBuilder`` profile_config."""
-
-    def box(m):
-        return [m["x1"], m["y1"], m["x2"], m["y2"]]
-
-    def color(c):
-        return list(c) if c is not None else [1.0, 1.0, 1.0, 1.0]
-
-    return {
-        "cropmask": burnin.get("cropmask", {"enable": False}),
-        "text_elements": {
-            el["name"]: {
-                **{
-                    k: v
-                    for k, v in el.items()
-                    if k not in ("name", "box", "font_color")
-                },
-                "box": box(el["box"]),
-                "font_color": color(el.get("font_color")),
-                "font": _resolve_font(el.get("font", "")),
-            }
-            for el in burnin.get("text_elements", [])
-        },
-    }

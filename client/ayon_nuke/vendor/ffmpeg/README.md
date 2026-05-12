@@ -1,0 +1,3 @@
+- vendored custom ffmpeg build is intentionally left out of ayon-nuke 
+- to use it, compile and bundle executables for windows and linux here https://github.com/hornet-animation/Academy-FFmpeg-Build
+- ffmpeg.exe and ffmpeg linux excutable live here as single executables

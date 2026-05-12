@@ -11,7 +11,7 @@ from .common import (
     validate_json_dict,
 )
 from .ffmpeg_review import (
-    IntegrateFFmpegReviewModel,
+    ExtractFFmpegReviewModel,
     DEFAULT_FFMPEG_REVIEW_SETTINGS,
 )
 
@@ -297,9 +297,9 @@ class PublishPluginsModel(BaseSettingsModel):
         default_factory=HornetReviewMediaModel,
         section="Integrators",
     )
-    IntegrateFFmpegReview: IntegrateFFmpegReviewModel = SettingsField(
-        title="Integrate FFmpeg Review",
-        default_factory=IntegrateFFmpegReviewModel,
+    ExtractFFmpegReview: ExtractFFmpegReviewModel = SettingsField(
+        title="Extract FFmpeg Review",
+        default_factory=ExtractFFmpegReviewModel,
     )
     IncrementScriptVersion: OptionalPluginModel = SettingsField(
         title="Increment Workfile Version",
@@ -448,7 +448,7 @@ DEFAULT_PUBLISH_PLUGIN_SETTINGS = {
         "template_script": r"T:\util\nuke\scripts\publishTemplate\hornet_publish_template.nk",
         #"template_script": r"P:/dev/alexh_dev/hornet_publish/hornet_publish_template.nk",
     },
-    "IntegrateFFmpegReview": DEFAULT_FFMPEG_REVIEW_SETTINGS,
+    "ExtractFFmpegReview": DEFAULT_FFMPEG_REVIEW_SETTINGS,
     "IncrementScriptVersion": {
         "enabled": False,
         "optional": True,

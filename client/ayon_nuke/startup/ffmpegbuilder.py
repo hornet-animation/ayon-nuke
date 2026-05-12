@@ -3,27 +3,59 @@ import os
 import shlex
 import subprocess
 
+import ayon_nuke
 
+
+_ADDON_ROOT = os.path.dirname(ayon_nuke.__file__)
 FFMPEG_EXE = os.path.normpath(
     os.path.join(
-        os.path.dirname(__file__), "..", "vendor", "ffmpeg", "bin", "ffmpeg.exe",
+        _ADDON_ROOT, "vendor", "ffmpeg", "bin", "ffmpeg.exe",
     )
 )
 
 
-def _which_ffmpeg():
-    if os.path.isfile(FFMPEG_EXE):
-        return FFMPEG_EXE
-    return "ffmpeg"
+# (color_primaries, color_trc, colorspace) per delivery target.
+# Describes the bytes in the encoded file, independent of which OCIO config
+# produced them — names will not drift across configs.
+DELIVERY_TAGS = {
+    "rec709":      ("bt709",   "bt709",        "bt709"),
+    "srgb":        ("bt709",   "iec61966-2-1", "bt709"),
+    "rec2020_sdr": ("bt2020",  "bt2020-10",    "bt2020nc"),
+    "rec2020_pq":  ("bt2020",  "smpte2084",    "bt2020nc"),
+    "rec2020_hlg": ("bt2020",  "arib-std-b67", "bt2020nc"),
+    "p3_d65":      ("smpte432", "bt709",       "bt709"),
+    "linear":      ("bt709",   "linear",       "bt709"),
+}
+
+# Codec + delivery combinations that use full-range YUV. ProRes / DNxHD are
+# always tv-range; libx264 etc. can encode full-range, which sRGB / linear
+# deliveries want so blacks aren't crushed into 16-235.
+_FLEX_RANGE_CODECS = {"libx264", "libx265", "libsvtav1", "mjpeg"}
+_PC_RANGE_DELIVERIES = {"srgb", "linear"}
 
 
-def _escape_drawtext(txt):
-    """Escape ``'`` for ffmpeg ``drawtext text='...'`` (single-quote → ``''``)."""
-    return txt.replace("'", "''")
+# (codec_config key, ffmpeg flag, allow_zero).
+# allow_zero=True keeps 0 as a valid value (crf=0 is lossless;
+# bframes=0 means "no B-frames"); the rest treat 0/"" as "not set".
+_ENCODER_OPTS = [
+    ("codec",      "-c:v",        False),
+    ("profile",    "-profile:v",  False),
+    ("qscale",     "-qscale:v",   False),
+    ("preset",     "-preset",     False),
+    ("keyint",     "-g",          False),
+    ("bframes",    "-bf",         True),
+    ("tune",       "-tune",       False),
+    ("crf",        "-crf",        True),
+    ("pix_fmt",    "-pix_fmt",    False),
+    ("vendor",     "-vendor",     False),
+    ("metadata_s", "-metadata:s", False),
+    ("bitrate",    "-b:v",        False),
+    ("quality",    "-q:v",        False),
+]
 
 
 class FFMpegBuilder:
-    """Build an ffmpeg command for review-media encoding.
+    """Build ffmpeg command-line arguments for review-media encoding.
 
     Assembles a single ffmpeg invocation whose ``-vf`` chain handles colour
     conversion (``ocio``), scaling (``scale``/``pad``), crop-masks
@@ -41,8 +73,8 @@ class FFMpegBuilder:
         self._text = {}
         self._input_colorspace = None
         self._output_colorspace = None
-        self._ocio_config = None
-        self._ffmpeg = _which_ffmpeg()
+        self._delivery = None
+        self._ffmpeg = FFMPEG_EXE if os.path.isfile(FFMPEG_EXE) else "ffmpeg"
 
     def input(self, path, start_number=1):
         self._input_path = path
@@ -61,51 +93,20 @@ class FFMpegBuilder:
         self._text.update(kwargs)
         return self
 
-    def color(self, input_colorspace=None, output_colorspace=None, ocio_config=None):
+    def color(self, input_colorspace=None, output_colorspace=None, delivery=None):
+        """``delivery`` is independent of ``output_colorspace`` — it names
+        the target spec (``rec709``, ``srgb``, …) so the encoded file can
+        be tagged with the right primaries/trc/matrix/range regardless of
+        what the specific name in the OCIO file is.
+        """
         self._input_colorspace = input_colorspace
         self._output_colorspace = output_colorspace
-        self._ocio_config = ocio_config
+        self._delivery = delivery
         return self
-
-    def _resolve_font(self, font_path):
-        """Return a font path safe to embed in an ffmpeg filter string.
-
-        Windows drive-letter colons (``D:/...``) collide with ffmpeg's
-        ``key:value`` filter syntax, so paths are converted to relative form
-        when possible.
-        """
-        if not font_path:
-            return None
-        if os.path.isfile(font_path):
-            return self._make_filter_safe_path(font_path)
-        pkg_dir = os.path.dirname(__file__)
-        abs_path = os.path.join(pkg_dir, font_path)
-        if os.path.isfile(abs_path):
-            return self._make_filter_safe_path(abs_path)
-        return None
-
-    @staticmethod
-    def _make_filter_safe_path(abs_path):
-        abs_path = os.path.normpath(os.path.abspath(abs_path))
-        cwd = os.path.normpath(os.getcwd())
-        try:
-            rel = os.path.relpath(abs_path, cwd)
-            return rel.replace(os.sep, "/")
-        except ValueError:
-            return abs_path.replace(os.sep, "/")
-
-    @staticmethod
-    def _frames_to_timecode(frame, framerate):
-        """Frame N at fps F → ``HH:MM:SS:FF`` (non-drop-frame)."""
-        fps = max(1, int(round(float(framerate))))
-        f = int(frame) % fps
-        s = (int(frame) // fps) % 60
-        m = (int(frame) // (fps * 60)) % 60
-        h = int(frame) // (fps * 3600)
-        return f"{h:02d}:{m:02d}:{s:02d}:{f:02d}"
 
     @staticmethod
     def _resolve_crop(value, ref_px):
+        """Convert a crop value (int, str percent, or None) to pixels."""
         if not value:
             return 0
         if isinstance(value, str) and "%" in value:
@@ -166,6 +167,12 @@ class FFMpegBuilder:
 
         text_elements = self.p.get("text_elements") if self.p else None
         if text_elements:
+            # drawtext's box-compositing renders the box as magenta with
+            # hollow green-edged text on the float planar RGB that ocio
+            # outputs from EXR sources. gbrp16le keeps planar-RGB layout
+            # and float-equivalent precision, and lands drawtext on a
+            # working code path.
+            filters.append("format=gbrp16le")
             for name, element in text_elements.items():
                 if not element or not element.get("enable", True):
                     continue
@@ -176,7 +183,25 @@ class FFMpegBuilder:
         return ",".join(filters) if filters else None
 
     def _build_drawtext(self, name, element, width, height):
-        font = self._resolve_font(element.get("font"))
+        # Windows drive-letter colons collide with ffmpeg's key:value filter
+        # syntax, so the resolved font path is converted to relative form
+        # against cwd when possible.
+        font = None
+        font_path = element.get("font")
+        if font_path:
+            pkg_dir = os.path.dirname(__file__)
+            for cand in (font_path, os.path.join(pkg_dir, font_path)):
+                if not os.path.isfile(cand):
+                    continue
+                abs_path = os.path.normpath(os.path.abspath(cand))
+                try:
+                    font = os.path.relpath(abs_path, os.getcwd())
+                except ValueError:
+                    # Different Windows drives — relpath impossible.
+                    font = abs_path
+                font = font.replace(os.sep, "/")
+                break
+
         font_size = element.get("font_size", 0.015)
         font_color = element.get("font_color", [0.8, 0.8, 0.8, 1.0])
         box = element.get("box", [0.0, 0.0, 1.0, 1.0])
@@ -184,8 +209,12 @@ class FFMpegBuilder:
         prefix = element.get("prefix", "") or ""
 
         if name == "framecounter":
-            # ffmpeg's frame_num — zero-padding via %{eif} breaks filter parsing.
-            raw_text = "%{frame_num}"
+            # n is the filter's input frame index (0-based); offset by the
+            # source sequence's start frame so the burnin reads as the actual
+            # frame number on the timeline. Colons inside %{...} are escaped
+            # so ffmpeg's filter parser doesn't mistake them for option
+            # separators (single quotes don't shield them here).
+            raw_text = f"%{{eif\\:n+{self._start_number}\\:d}}"
         else:
             raw_text = self._text.get(name)
             if raw_text is None and name == "datetime":
@@ -197,33 +226,43 @@ class FFMpegBuilder:
             if raw_text is None:
                 return None
             if prefix:
-                raw_text = prefix + raw_text
-            raw_text = str(raw_text)
+                raw_text = f"{prefix}{raw_text}"
 
-        x = int(box[0] * width)
+        # text_align only controls multi-line wrap alignment in drawtext, so
+        # for single-line burnins we have to anchor x ourselves using the
+        # ``tw`` (text-width) expression — otherwise right/center burnins
+        # render off the right edge of the frame.
+        left_px = int(box[0] * width)
+        right_px = int(box[2] * width)
+        if justify == "right":
+            x_expr = f"{right_px}-tw"
+        elif justify == "center":
+            x_expr = f"{(left_px + right_px) // 2}-tw/2"
+        else:
+            x_expr = str(left_px)
         y = int(height - box[3] * height)
         fontsize = max(1, int(font_size * width))
 
         r, g, b, a = font_color
         color_hex = f"0x{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
+        # Single quotes inside text='...' must be doubled so ffmpeg's filter
+        # parser doesn't terminate the value early.
+        escaped = raw_text.replace("'", "''")
+
         parts = []
         if font:
-            parts.append(f"fontfile='{font.replace(os.sep, '/')}'")
-        parts.append(f"text='{_escape_drawtext(raw_text)}'")
+            parts.append(f"fontfile='{font}'")
+        parts.append(f"text='{escaped}'")
         parts.append(f"fontsize={fontsize}")
         parts.append(f"fontcolor={color_hex}")
         parts.append(f"alpha={a}")
-        parts.append(f"x={x}")
+        parts.append(f"x={x_expr}")
         parts.append(f"y={y}")
         parts.append("y_align=font")
-
-        if justify == "center":
-            parts.append("text_align=C")
-        elif justify == "right":
-            parts.append("text_align=R")
-        else:
-            parts.append("text_align=L")
+        parts.append("box=1")
+        parts.append("boxcolor=black@0.5")
+        parts.append("boxborderw=8")
 
         return "drawtext=" + ":".join(parts)
 
@@ -250,42 +289,46 @@ class FFMpegBuilder:
             cmd.extend(["-vf", vf])
 
         enc = self.c
-        if enc.get("codec"):
-            cmd.extend(["-c:v", enc["codec"]])
-        if enc.get("profile"):
-            cmd.extend(["-profile:v", str(enc["profile"])])
-        if enc.get("qscale"):
-            cmd.extend(["-qscale:v", str(enc["qscale"])])
-        if enc.get("preset"):
-            cmd.extend(["-preset", enc["preset"]])
-        if enc.get("keyint"):
-            cmd.extend(["-g", str(enc["keyint"])])
-        if enc.get("bframes") is not None:
-            cmd.extend(["-bf", str(enc["bframes"])])
-        if enc.get("tune"):
-            cmd.extend(["-tune", enc["tune"]])
-        if enc.get("crf") is not None:
-            cmd.extend(["-crf", str(enc["crf"])])
-        if enc.get("pix_fmt"):
-            cmd.extend(["-pix_fmt", enc["pix_fmt"]])
-        if enc.get("vendor"):
-            cmd.extend(["-vendor", enc["vendor"]])
-        if enc.get("metadata_s"):
-            cmd.extend(["-metadata:s", enc["metadata_s"]])
-        if enc.get("bitrate"):
-            cmd.extend(["-b:v", enc["bitrate"]])
-        if enc.get("quality"):
-            cmd.extend(["-q:v", str(enc["quality"])])
+        for key, flag, allow_zero in _ENCODER_OPTS:
+            val = enc.get(key)
+            if val is None or (not allow_zero and not val):
+                continue
+            cmd.extend([flag, str(val)])
+
+        # Delivery container tags (range/primaries/trc/matrix). Emitted before
+        # extra_args so a profile can still override any of them explicitly.
+        # Range is derived from codec + delivery: ProRes / DNxHD stay tv-range,
+        # h264/h265/AV1 use full range for sRGB / linear deliveries so blacks
+        # aren't crushed.
+        delivery = self._delivery
+        tags = DELIVERY_TAGS.get(delivery) if delivery and delivery != "none" else None
+        if tags:
+            primaries, trc, matrix = tags
+            use_pc = (
+                enc.get("codec") in _FLEX_RANGE_CODECS
+                and delivery in _PC_RANGE_DELIVERIES
+            )
+            cmd.extend([
+                "-color_range", "pc" if use_pc else "tv",
+                "-color_primaries", primaries,
+                "-color_trc", trc,
+                "-colorspace", matrix,
+            ])
 
         if framerate:
             cmd.extend(["-r", str(framerate)])
 
-        cmd.extend(["-timecode", self._frames_to_timecode(self._start_number, framerate)])
+        # Non-drop-frame HH:MM:SS:FF for the source start frame.
+        fps = max(1, int(round(float(framerate))))
+        n = int(self._start_number)
+        tc = f"{n // (fps * 3600):02d}:{n // (fps * 60) % 60:02d}:{n // fps % 60:02d}:{n % fps:02d}"
+        cmd.extend(["-timecode", tc])
 
-        # extra_args last so they override anything above.
+        # extra_args last so they override anything above. ``comments=True``
+        # enables ``#`` end-of-line comments in the textarea setting.
         extra = enc.get("extra_args")
         if extra:
-            cmd.extend(shlex.split(str(extra)))
+            cmd.extend(shlex.split(str(extra), comments=True))
 
         cmd.append(self._output_path)
         return cmd
@@ -293,20 +336,13 @@ class FFMpegBuilder:
     def build_string(self):
         return " ".join(shlex.quote(str(arg)) for arg in self.build())
 
-    def get_env(self):
-        env = os.environ.copy()
-        if self._ocio_config:
-            env["OCIO"] = self._ocio_config
-        return env
-
     def run(self, check=False):
         cmd = self.build()
-        env = self.get_env()
         print("Running:")
         for part in cmd:
             print(f"  {part}")
         print()
-        result = subprocess.run(cmd, env=env)
+        result = subprocess.run(cmd)
         if check and result.returncode != 0:
             raise subprocess.CalledProcessError(result.returncode, cmd)
         return result

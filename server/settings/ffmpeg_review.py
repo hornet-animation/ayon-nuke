@@ -146,10 +146,6 @@ class FFmpegTextElementModel(BaseSettingsModel):
     box: FFmpegBoxModel = SettingsField(
         default_factory=FFmpegBoxModel, title="Box (0–1, BL origin)"
     )
-    font: str = SettingsField(
-        "", title="Font",
-        description="Path; falls back to the bundled Inter when empty.",
-    )
     font_size: float = SettingsField(
         0.02, title="Size (fraction of width)", gt=0, le=1,
     )
@@ -211,7 +207,7 @@ class FFmpegProfileModel(BaseSettingsModel):
     )
 
 
-class IntegrateFFmpegReviewModel(BaseSettingsModel):
+class ExtractFFmpegReviewModel(BaseSettingsModel):
     _isGroup = True
     enabled: bool = SettingsField(False, title="Enable plugin")
     create_read_node: bool = SettingsField(
