@@ -193,12 +193,6 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
 
 DONT_DELETE = [
     api.INSTANCE_DATA_KNOB,
-    # "experimental",
-    # "quick_publish",
-    # "generate_review_media",
-    # "generate_review_media_on_farm",
-    # "publish_on_farm",
-    # "burnin",
 ]
 
 
@@ -537,16 +531,12 @@ def embed_quick_publish():
         generate_review_farm_checkbox = nuke.Boolean_Knob(
             "generate_review_media_on_farm", "Use farm for review media"
         )
-        generate_review_farm_checkbox.setValue(False)
         generate_review_farm_checkbox.setTooltip(
             "Generate review media using the farm instead of locally"
         )
         generate_review_farm_checkbox.setFlag(nuke.STARTLINE)
-
-        # If publish_on_farm is True, automatically set this to True and disable it
-        if publish_on_farm_checkbox.value():
-            generate_review_farm_checkbox.setValue(True)
-            generate_review_farm_checkbox.setEnabled(False)
+        generate_review_farm_checkbox.setValue(publish_on_farm_checkbox.value())
+        generate_review_farm_checkbox.setEnabled(publish_on_farm_checkbox.value())
 
         burnin_checkbox = nuke.Boolean_Knob(
             "burnin", "Apply burnin to review proxy"
@@ -579,24 +569,18 @@ def embed_quick_publish():
 
 
 def handle_farm_publish_logic():
-    """
-    Handle the logic for farm publishing checkboxes.
-    If publish_on_farm is checked, force generate_review_media_on_farm to True and disable it.
-    """
     nde = nuke.thisNode()
     kb = nuke.thisKnob()
 
     if not kb or kb.name() != "publish_on_farm":
         return
 
-    if not nde.knob("generate_review_media_on_farm"):
+    review_farm = nde.knob("generate_review_media_on_farm")
+    if not review_farm:
         return
 
-    if kb.value():
-        nde.knob("generate_review_media_on_farm").setValue(True)
-        nde.knob("generate_review_media_on_farm").setEnabled(False)
-    else:
-        nde.knob("generate_review_media_on_farm").setEnabled(True)
+    review_farm.setValue(kb.value())
+    review_farm.setEnabled(kb.value())
 
 
 def check_existing_files_pattern(node):
@@ -778,11 +762,6 @@ def parse_publish_instance(qnode):
 
 def quick_publish_wrapper(node):
     from hornet_publish_utils import quick_publish
-
-    # review = node["generate_review_media"].value()
-    # review_farm = node["generate_review_media_on_farm"].value()
-    # integrate_farm = node["publish_on_farm"].value()
-    # burnin = node["burnin"].value()
 
     review_knob = node.knobs().get("generate_review_media")
     review = review_knob.value() if review_knob else False

@@ -2,16 +2,19 @@ import datetime
 import os
 import shlex
 import subprocess
+import sys
 
 import ayon_nuke
 
 
 _ADDON_ROOT = os.path.dirname(ayon_nuke.__file__)
-FFMPEG_EXE = os.path.normpath(
+_FFMPEG_BIN = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
+_VENDORED_FFMPEG = os.path.normpath(
     os.path.join(
-        _ADDON_ROOT, "vendor", "ffmpeg", "bin", "ffmpeg.exe",
+        _ADDON_ROOT, "vendor", "ffmpeg", "bin", _FFMPEG_BIN,
     )
 )
+FFMPEG_EXE = _VENDORED_FFMPEG if os.path.isfile(_VENDORED_FFMPEG) else "ffmpeg"
 
 
 # (color_primaries, color_trc, colorspace) per delivery target.
@@ -74,7 +77,7 @@ class FFMpegBuilder:
         self._input_colorspace = None
         self._output_colorspace = None
         self._delivery = None
-        self._ffmpeg = FFMPEG_EXE if os.path.isfile(FFMPEG_EXE) else "ffmpeg"
+        self._ffmpeg = FFMPEG_EXE
 
     def input(self, path, start_number=1):
         self._input_path = path

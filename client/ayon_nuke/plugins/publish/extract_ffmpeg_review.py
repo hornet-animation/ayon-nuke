@@ -253,8 +253,6 @@ class ExtractFFmpegReview(
 
         codec_config = {
             "codec": codec["codec"],
-            "name": profile_name,
-            "movie_ext": codec["movie_ext"],
             "pix_fmt": codec["pix_fmt"] or None,
             "profile": codec["profile"] or None,
             "extra_args": codec.get("extra_args") or None,

@@ -8,7 +8,6 @@ HORNET_MODULES = [
     "view_manager",
     "hornet_deadline_utils",
     "hornet_publish_utils",
-    "hornet_publish_review_media",
     "file_sequence",
     "file_sequence.file_sequence",
     "views_write",
@@ -19,7 +18,6 @@ HORNET_MODULES = [
     "jesse_send",
     "minimal_sequence_factory",
     "nuke_loader",
-    "publish_force_import",
     "reload_hornet",
 ]
 

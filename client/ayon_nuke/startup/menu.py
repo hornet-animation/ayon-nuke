@@ -43,7 +43,6 @@ from ayon_core.lib import Logger
 from ayon_nuke.api.lib import WorkfileSettings
 from ayon_core.tools.utils import host_tools
 import ayon_api
-import hornet_publish_review_media
 import hornet_deadline_utils
 import file_sequence
 import views_write

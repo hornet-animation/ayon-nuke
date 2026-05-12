@@ -184,19 +184,6 @@ class IntermediateOutputModel(BaseSettingsModel):
     )
 
 
-class HornetReviewMediaModel(BaseSettingsModel):
-    """Settings for hornet review media generator."""
-
-    _layout = "expanded"
-    enabled: bool = SettingsField(title="Enabled")
-    template_script: str = SettingsField(
-        #default=r"P:/dev/alexh_dev/hornet_publish/hornet_publish_template.nk",
-        default=r"T:\util\nuke\scripts\publishTemplate\hornet_publish_template.nk",
-        title="Review media template script location",
-        description="The template script that will be rendered to generate review media.",
-    )
-
-
 class ExtractReviewIntermediatesModel(BaseSettingsModel):
     enabled: bool = SettingsField(title="Enabled")
     viewer_lut_raw: bool = SettingsField(title="Viewer lut raw")
@@ -292,14 +279,10 @@ class PublishPluginsModel(BaseSettingsModel):
     ExtractSlateFrame: ExtractSlateFrameModel = SettingsField(
         title="Extract Slate Frame", default_factory=ExtractSlateFrameModel
     )
-    HornetReviewMedia: HornetReviewMediaModel = SettingsField(
-        title="Hornet Review Media",
-        default_factory=HornetReviewMediaModel,
-        section="Integrators",
-    )
     ExtractFFmpegReview: ExtractFFmpegReviewModel = SettingsField(
         title="Extract FFmpeg Review",
         default_factory=ExtractFFmpegReviewModel,
+        section="Integrators",
     )
     IncrementScriptVersion: OptionalPluginModel = SettingsField(
         title="Increment Workfile Version",
@@ -442,11 +425,6 @@ DEFAULT_PUBLISH_PLUGIN_SETTINGS = {
             },
             "f_vfx_scope_of_work": {"enabled": False, "template": ""},
         },
-    },
-    "HornetReviewMedia": {
-        "enabled": True,
-        "template_script": r"T:\util\nuke\scripts\publishTemplate\hornet_publish_template.nk",
-        #"template_script": r"P:/dev/alexh_dev/hornet_publish/hornet_publish_template.nk",
     },
     "ExtractFFmpegReview": DEFAULT_FFMPEG_REVIEW_SETTINGS,
     "IncrementScriptVersion": {
