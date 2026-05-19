@@ -3,7 +3,6 @@ import re
 import subprocess
 import tempfile
 
-import nuke
 import pyblish.api
 from qtpy import QtCore, QtWidgets
 from ayon_core import resources
@@ -12,7 +11,18 @@ from ayon_core.pipeline.publish import OptionalPyblishPluginMixin
 from ayon_nuke.startup.ffmpegbuilder import FFMpegBuilder
 
 
-DEFAULT_FONT = resources.get_liberation_font_path()
+# sanitized for ffmpeg's drawtext filter: `\` → `/`, drive-letter `:` → `\:`.
+BURNIN_FONT = (
+    resources.get_liberation_font_path()
+    .replace("\\", "/")
+    .replace(":", r"\:")
+)
+
+
+def _is_gui_run():
+    # farm-side pyblish is launched with `--targets farm`; anything else
+    # is treated as an interactive Nuke session where GUI work is allowed.
+    return "farm" not in pyblish.api.registered_targets()
 
 
 class _FFmpegDialog(QtWidgets.QDialog):
@@ -167,7 +177,7 @@ class ExtractFFmpegReview(
         input_colorspace = instance.data.get("colorspace")
         create_read_node = (
             plugin_settings.get("create_read_node", False)
-            and nuke.env.get("gui")
+            and _is_gui_run()
         )
 
         # Count matching profiles for dialog
@@ -177,7 +187,7 @@ class ExtractFFmpegReview(
         total_jobs = len(matching_profiles)
 
         dialog = None
-        if nuke.env.get("gui") and total_jobs > 0:
+        if _is_gui_run() and total_jobs > 0:
             app = QtWidgets.QApplication.instance()
             parent = app.activeWindow() if app else None
             dialog = _FFmpegDialog(total_jobs, parent=parent)
@@ -275,7 +285,7 @@ class ExtractFFmpegReview(
                         list(el["font_color"]) if el.get("font_color") is not None
                         else [1.0, 1.0, 1.0, 1.0]
                     ),
-                    "font": DEFAULT_FONT,
+                    "font": BURNIN_FONT,
                 }
                 for el in burnin_config.get("text_elements", [])
             },
@@ -307,7 +317,7 @@ class ExtractFFmpegReview(
         )
 
         try:
-            if nuke.env.get("gui"):
+            if _is_gui_run():
                 self.log.debug("Running with Nuke GUI dialog")
                 self._run_with_dialog(builder.build(), profile_name, dialog)
             else:
@@ -334,6 +344,8 @@ class ExtractFFmpegReview(
         self.log.info(f"Added review representation: {builder.output_path}")
 
         if create_read_node:
+            # lazy: only reachable in interactive Nuke (gated by _is_gui_run).
+            import nuke
             try:
                 read = nuke.nodes.Read(
                     file=builder.output_path.replace("\\", "/"),

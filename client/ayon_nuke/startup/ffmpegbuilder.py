@@ -8,12 +8,15 @@ import ayon_nuke
 
 
 _ADDON_ROOT = os.path.dirname(ayon_nuke.__file__)
-_FFMPEG_BIN = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
-_VENDORED_FFMPEG = os.path.normpath(
-    os.path.join(
-        _ADDON_ROOT, "vendor", "ffmpeg", "bin", _FFMPEG_BIN,
+if sys.platform.startswith("win"):
+    _VENDORED_FFMPEG = os.path.join(
+        _ADDON_ROOT, "vendor", "ffmpeg", "windows", "ffmpeg.exe"
     )
-)
+else:
+    _VENDORED_FFMPEG = os.path.join(
+        _ADDON_ROOT, "vendor", "ffmpeg", "linux", "bin", "ffmpeg"
+    )
+_VENDORED_FFMPEG = os.path.normpath(_VENDORED_FFMPEG)
 FFMPEG_EXE = _VENDORED_FFMPEG if os.path.isfile(_VENDORED_FFMPEG) else "ffmpeg"
 
 
@@ -186,24 +189,7 @@ class FFMpegBuilder:
         return ",".join(filters) if filters else None
 
     def _build_drawtext(self, name, element, width, height):
-        # Windows drive-letter colons collide with ffmpeg's key:value filter
-        # syntax, so the resolved font path is converted to relative form
-        # against cwd when possible.
-        font = None
-        font_path = element.get("font")
-        if font_path:
-            pkg_dir = os.path.dirname(__file__)
-            for cand in (font_path, os.path.join(pkg_dir, font_path)):
-                if not os.path.isfile(cand):
-                    continue
-                abs_path = os.path.normpath(os.path.abspath(cand))
-                try:
-                    font = os.path.relpath(abs_path, os.getcwd())
-                except ValueError:
-                    # Different Windows drives — relpath impossible.
-                    font = abs_path
-                font = font.replace(os.sep, "/")
-                break
+        font = element.get("font") or None
 
         font_size = element.get("font_size", 0.015)
         font_color = element.get("font_color", [0.8, 0.8, 0.8, 1.0])

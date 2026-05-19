@@ -126,6 +126,9 @@ jobs:
           # Execute the Python script
           UPSTREAM_VERSION_INPUT="${{ inputs.upstream_version }}" python increment_version.py
 
+      - name: Bootstrap vendored ffmpeg
+        run: python setup_ffmpeg.py
+
       - name: Create package
         run: |
           # Run create_package.py
