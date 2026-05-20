@@ -76,15 +76,17 @@ class FFMpegBuilder:
         self._input_path = None
         self._output_path = None
         self._start_number = 1
+        self._frame_count = None
         self._text = {}
         self._input_colorspace = None
         self._output_colorspace = None
         self._delivery = None
         self._ffmpeg = FFMPEG_EXE
 
-    def input(self, path, start_number=1):
+    def input(self, path, start_number=1, frame_count=None):
         self._input_path = path
         self._start_number = start_number
+        self._frame_count = frame_count
         return self
 
     def output(self, path):
@@ -129,8 +131,10 @@ class FFMpegBuilder:
         cropwidth = self.g.get("cropwidth")
         cropheight = self.g.get("cropheight")
 
-        out_w = width or 1920
-        out_h = height or 1080
+        src_w = self.g.get("source_width")
+        src_h = self.g.get("source_height")
+        out_w = width or src_w or 1920
+        out_h = height or src_h or 1080
 
         if cropwidth or cropheight:
             cw = self._resolve_crop(cropwidth, out_w)
@@ -276,6 +280,9 @@ class FFMpegBuilder:
         vf = self._build_vf_chain()
         if vf:
             cmd.extend(["-vf", vf])
+
+        if self._frame_count:
+            cmd.extend(["-frames:v", str(int(self._frame_count))])
 
         enc = self.c
         for key, flag, allow_zero in _ENCODER_OPTS:

@@ -217,6 +217,7 @@ class ExtractFFmpegReview(
                     text_values=text_values,
                     dialog=dialog,
                     create_read_node=create_read_node,
+                    profile_index=idx,
                 )
         finally:
             if dialog is not None:
@@ -241,6 +242,7 @@ class ExtractFFmpegReview(
         text_values,
         dialog=None,
         create_read_node=False,
+        profile_index=1,
     ):
         output_colorspace = colorspace.get("output") or None
         delivery = colorspace.get("delivery") or None
@@ -259,6 +261,8 @@ class ExtractFFmpegReview(
             "height": codec["height"],
             "fit": codec["fit"],
             "framerate": fps,
+            "source_width": instance.data.get("resolutionWidth"),
+            "source_height": instance.data.get("resolutionHeight"),
         }
 
         codec_config = {
@@ -291,15 +295,22 @@ class ExtractFFmpegReview(
             },
         }
 
+        frame_end = instance.data.get("frameEnd")
+        frame_count = (
+            max(1, int(frame_end) - int(start_frame) + 1)
+            if frame_end is not None else None
+        )
+
         self.log.info(
             f"Running ffmpeg review | profile={profile_name} "
             f"colorspace={input_colorspace}->{output_colorspace} "
-            f"input={input_pattern} start_frame={start_frame}"
+            f"input={input_pattern} start_frame={start_frame} "
+            f"frame_count={frame_count}"
         )
 
         builder = (
             FFMpegBuilder(globals_config, codec_config, profile_config)
-            .input(input_pattern, start_number=start_frame)
+            .input(input_pattern, start_number=start_frame, frame_count=frame_count)
             .output(output_path)
             .color(
                 input_colorspace=input_colorspace,
@@ -353,6 +364,19 @@ class ExtractFFmpegReview(
                 )
                 if output_colorspace:
                     read["colorspace"].setValue(output_colorspace)
+
+                # Place the Read beneath the publish write-group it came from,
+                # offset horizontally per profile so multiple deliverables sit
+                # in a row instead of stacking on top of one another.
+                group = (
+                    instance.data.get("transientData", {}).get("node")
+                )
+                if group is not None:
+                    read.setXYpos(
+                        group.xpos() + (profile_index - 1) * 100,
+                        group.ypos() + 100,
+                    )
+
                 self.log.info(
                     f"Created Read node {read.name()} -> {builder.output_path}"
                 )
