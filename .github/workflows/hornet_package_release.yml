@@ -1,0 +1,160 @@
+name: Build and Release Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Upstream version prefix (e.g. 0.3.7). Set automatically by the sync workflow; leave blank for normal releases.'
+        required: false
+        default: ''
+  push:
+    branches:
+      - develop
+    paths-ignore:
+      - 'package.py'
+      - 'client/ayon_nuke/version.py'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Increment version
+        id: increment_version
+        run: |
+          # Create a Python script to handle version incrementing
+          cat > increment_version.py << 'EOL'
+          import re
+          import os
+          import sys
+
+          # Upstream version passed explicitly by the sync workflow; empty on normal releases
+          upstream_version = os.environ.get('UPSTREAM_VERSION_INPUT', '').strip() or None
+          if upstream_version:
+              print(f"Upstream version from sync workflow: {upstream_version}")
+
+          # Read and extract current version from package.py
+          with open('package.py', 'r') as f:
+              package_content = f.read()
+
+          package_version_match = re.search(r'^version\s*=\s*"([^"]+)"', package_content, re.MULTILINE)
+          if not package_version_match:
+              print("Error: Could not find version in package.py")
+              print("Content of package.py:")
+              print(package_content)
+              sys.exit(1)
+
+          current_version = package_version_match.group(1)
+          print(f"Current version: {current_version}")
+
+          # Parse our version: {upstream_base}-hornet.{N}
+          hornet_match = re.match(r'^(.+)-hornet\.(\d+)$', current_version)
+          if not hornet_match:
+              print(f"Error: Version '{current_version}' does not match expected format 'X.Y.Z-hornet.N'")
+              sys.exit(1)
+
+          our_upstream_base = hornet_match.group(1)
+          current_n = int(hornet_match.group(2))
+
+          # Use upstream version as prefix if available, otherwise keep ours
+          version_prefix = upstream_version if upstream_version else our_upstream_base
+          new_version = f"{version_prefix}-hornet.{current_n + 1}"
+          print(f"New version: {new_version}")
+
+          updated_content = re.sub(
+              r'^version\s*=\s*"[^"]+"',
+              f'version = "{new_version}"',
+              package_content,
+              flags=re.MULTILINE
+          )
+
+          with open('package.py', 'w') as f:
+              f.write(updated_content)
+
+          print(f"Updated package.py: {current_version} -> {new_version}")
+
+          # Update client/ayon_nuke/version.py if it exists
+          client_version_path = 'client/ayon_nuke/version.py'
+          if os.path.exists(client_version_path):
+              with open(client_version_path, 'r') as f:
+                  client_content = f.read()
+
+              # Determine which version pattern to use
+              if '**version**' in client_content:
+                  client_version_match = re.search(r'\*\*version\*\*\s*=\s*"([^"]+)"', client_content)
+                  if client_version_match:
+                      client_current_version = client_version_match.group(1)
+                      updated_client_content = client_content.replace(
+                          f'**version** = "{client_current_version}"',
+                          f'**version** = "{new_version}"'
+                      )
+                      with open(client_version_path, 'w') as f:
+                          f.write(updated_client_content)
+                      print(f"Updated {client_version_path}: {client_current_version} -> {new_version}")
+              else:
+                  client_version_match = re.search(r'__version__\s*=\s*"([^"]+)"', client_content)
+                  if client_version_match:
+                      client_current_version = client_version_match.group(1)
+                      updated_client_content = client_content.replace(
+                          f'__version__ = "{client_current_version}"',
+                          f'__version__ = "{new_version}"'
+                      )
+                      with open(client_version_path, 'w') as f:
+                          f.write(updated_client_content)
+                      print(f"Updated {client_version_path}: {client_current_version} -> {new_version}")
+
+          # Create GitHub-friendly tag
+          github_tag = new_version.replace('.', '_').replace('-', '_')
+          print(f"GitHub tag: {github_tag}")
+
+          # Output for GitHub Actions
+          if 'GITHUB_OUTPUT' in os.environ:
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"version={new_version}\n")
+                  f.write(f"github_tag={github_tag}\n")
+          EOL
+
+          # Execute the Python script
+          UPSTREAM_VERSION_INPUT="${{ inputs.upstream_version }}" python increment_version.py
+
+      - name: Bootstrap vendored ffmpeg
+        run: python setup_ffmpeg.py
+
+      - name: Create package
+        run: |
+          # Run create_package.py
+          python create_package.py
+
+          # Verify the package was created
+          ls -la package/
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.increment_version.outputs.github_tag }}
+          name: Release ${{ steps.increment_version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            package/nuke-${{ steps.increment_version.outputs.version }}.zip
+          generate_release_notes: true
+
+      - name: Commit version changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add package.py client/ayon_nuke/version.py
+          git commit -m "CI bump version to ${{ steps.increment_version.outputs.version }}"
+          git push
