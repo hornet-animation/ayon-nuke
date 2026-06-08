@@ -365,6 +365,18 @@ class ExtractFFmpegReview(
                 if output_colorspace:
                     read["colorspace"].setValue(output_colorspace)
 
+                # Pin the Read's playable range to publishStart/publishEnd so
+                # it lines up with the source's publish range in the timeline.
+                # ``start at`` remaps file-internal frame 1 to ``frame_start``.
+                if frame_end is not None:
+                    fs, fe = int(start_frame), int(frame_end)
+                    read["first"].setValue(fs)
+                    read["last"].setValue(fe)
+                    read["origfirst"].setValue(fs)
+                    read["origlast"].setValue(fe)
+                    read["frame_mode"].setValue("start at")
+                    read["frame"].setValue(str(fs))
+
                 # Place the Read beneath the publish write-group it came from,
                 # offset horizontally per profile so multiple deliverables sit
                 # in a row instead of stacking on top of one another.
