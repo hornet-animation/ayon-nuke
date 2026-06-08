@@ -235,6 +235,8 @@ class CollectNukeWrites(
                 "ext": ext,
                 "colorspace": colorspace,
                 "color_channels": color_channels,
+                "resolutionWidth": write_node.format().width(),
+                "resolutionHeight": write_node.format().height(),
             }
         )
 
