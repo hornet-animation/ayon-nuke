@@ -459,12 +459,17 @@ Quick Publish
 
 Experimental alternative to the ayon ui for submitting publishes.
 
-If "Transfer renders using farm" is unchecked, the transfers will take place locally and will freeze Nuke until complete. If the transfer is large, this could take a while, but nuke has probably not crashed.
+"Publish on Farm" controls where the entire publish runs:
+  - Unchecked: publish (and review media generation) runs locally. Nuke
+    will freeze until complete; large transfers can take a while but Nuke
+    has probably not crashed.
+  - Checked: publish runs remotely on the farm, including review media.
 
-If "Transfer renders using farm" is checked, the transfer will take place remotely.
+"Generate Review Media" toggles the ExtractFFmpegReview step entirely.
+When unchecked, no .mov/.mp4 review media is produced.
 
-"Generate review media" will create quicktimes and pngs according to a template nuke script and can be performed locally or remotely, but will be forced to process remotely if the transfer is remote.
-    
+"Apply burnins to Review" toggles burn-in overlays (timecode, frame
+counter, shot/version metadata) on the review media.
     """
 
     nuke.message(info_text)
@@ -509,11 +514,13 @@ def embed_quick_publish():
 
     # Create checkboxes
     publish_on_farm_checkbox = nuke.Boolean_Knob(
-        "publish_on_farm", "Transfer renders using Farm"
+        "publish_on_farm", "Publish on Farm"
     )
     publish_on_farm_checkbox.setValue(False)
     publish_on_farm_checkbox.setTooltip(
-        "Renders will be transferred to the publish location using the farm, unchecked will perform a local transfer"
+        "Run the full publish on the farm, including review media "
+        "generation. Unchecked runs the publish (and review extraction) "
+        "locally."
     )
     publish_on_farm_checkbox.setFlag(nuke.STARTLINE)
 
@@ -524,26 +531,18 @@ def embed_quick_publish():
         )
         generate_review_checkbox.setValue(True)
         generate_review_checkbox.setTooltip(
-            "Generate review media (mp4/mov) for the rendered sequence based on the template nuke script"
+            "Generate review media (mp4/mov) for the rendered sequence. "
+            "Unchecked skips ExtractFFmpegReview entirely."
         )
         generate_review_checkbox.setFlag(nuke.STARTLINE)
 
-        generate_review_farm_checkbox = nuke.Boolean_Knob(
-            "generate_review_media_on_farm", "Use farm for review media"
-        )
-        generate_review_farm_checkbox.setTooltip(
-            "Generate review media using the farm instead of locally"
-        )
-        generate_review_farm_checkbox.setFlag(nuke.STARTLINE)
-        generate_review_farm_checkbox.setValue(publish_on_farm_checkbox.value())
-        generate_review_farm_checkbox.setEnabled(publish_on_farm_checkbox.value())
-
         burnin_checkbox = nuke.Boolean_Knob(
-            "burnin", "Apply burnin to review proxy"
+            "burnin", "Apply burnins to Review"
         )
         burnin_checkbox.setValue(True)
         burnin_checkbox.setTooltip(
-            "Add burnin information (timecode, frame numbers, etc.) to proxy review media. Prores will not get burnin"
+            "Add burnin information (timecode, frame numbers, etc.) to "
+            "review media. Unchecked disables burnins."
         )
         burnin_checkbox.setFlag(nuke.STARTLINE)
 
@@ -562,25 +561,11 @@ def embed_quick_publish():
     # Only add review related knobs for non prerender nodes
     if not is_prerender:
         group.addKnob(generate_review_checkbox)
-        group.addKnob(generate_review_farm_checkbox)
         group.addKnob(burnin_checkbox)
 
     group.addKnob(show_info_button)
 
 
-def handle_farm_publish_logic():
-    nde = nuke.thisNode()
-    kb = nuke.thisKnob()
-
-    if not kb or kb.name() != "publish_on_farm":
-        return
-
-    review_farm = nde.knob("generate_review_media_on_farm")
-    if not review_farm:
-        return
-
-    review_farm.setValue(kb.value())
-    review_farm.setEnabled(kb.value())
 
 
 def check_existing_files_pattern(node):
@@ -766,13 +751,12 @@ def quick_publish_wrapper(node):
     review_knob = node.knobs().get("generate_review_media")
     review = review_knob.value() if review_knob else False
 
-    review_farm_knob = node.knobs().get("generate_review_media_on_farm")
-    review_farm = review_farm_knob.value() if review_farm_knob else False
-
     integrate_farm_knob = node.knobs().get("publish_on_farm")
     integrate_farm = (
         integrate_farm_knob.value() if integrate_farm_knob else False
     )
+    # review extraction follows the publish location
+    review_farm = integrate_farm
 
     burnin_knob = node.knobs().get("burnin")
     burnin = burnin_knob.value() if burnin_knob else False

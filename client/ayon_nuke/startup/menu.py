@@ -21,7 +21,6 @@ from quick_write import (
     embedOptions,
     presets,
     embed_quick_publish,
-    handle_farm_publish_logic,
     show_quick_publish_info,
     quick_publish_wrapper,
     quick_write_node,
@@ -193,11 +192,6 @@ def warnSingleFrame():
                 group.knob("generate_review_media").setValue(False)
                 group.knob("generate_review_media").setEnabled(False)
 
-            if group.knob("generate_review_media_on_farm"):
-                saved_states["generate_review_media_on_farm"] = group.knob("generate_review_media_on_farm").value()
-                group.knob("generate_review_media_on_farm").setValue(False)
-                group.knob("generate_review_media_on_farm").setEnabled(False)
-
             if group.knob("publish_on_farm"):
                 saved_states["publish_on_farm"] = group.knob("publish_on_farm").value()
                 group.knob("publish_on_farm").setValue(False)
@@ -220,11 +214,6 @@ def warnSingleFrame():
                 group.knob("generate_review_media").setEnabled(True)
                 if "generate_review_media" in saved_states:
                     group.knob("generate_review_media").setValue(saved_states["generate_review_media"])
-
-            if group.knob("generate_review_media_on_farm"):
-                group.knob("generate_review_media_on_farm").setEnabled(True)
-                if "generate_review_media_on_farm" in saved_states:
-                    group.knob("generate_review_media_on_farm").setValue(saved_states["generate_review_media_on_farm"])
 
             if group.knob("publish_on_farm"):
                 group.knob("publish_on_farm").setEnabled(True)
@@ -325,7 +314,6 @@ nuke.addKnobChanged(switchExtension, nodeClass="Write")
 nuke.addKnobChanged(embedOptions, nodeClass="Write")
 nuke.addKnobChanged(embed_quick_publish, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
-nuke.addKnobChanged(handle_farm_publish_logic, nodeClass="Group")
 nuke.addKnobChanged(warnSingleFrame, nodeClass="Write")
 nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
 #nuke.addOnScriptSave(set_hwrite_version)
