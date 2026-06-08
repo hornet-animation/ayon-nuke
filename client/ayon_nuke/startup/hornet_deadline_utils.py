@@ -247,12 +247,56 @@ def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None):
         return True
 
 
+def _rez_extra_info_pairs():
+    """Compute ExtraInfoKeyValue entries that bypass Deadline's Rez
+    event plugin AND drive its worker-side rez-env wrapper.
+
+    The worker activates the rez context only when it can match a tool
+    name from DEADLINE_REZ_TOOLS against the render plugin's executable
+    list. For Nuke jobs ``nuke`` must be in that list (added on the
+    Deadline side under Tools > Configure Plugins > Nuke).
+
+    Pre-setting both keys at submission triggers the event plugin's
+    OnJobSubmitted early-return so it doesn't warn about missing
+    REZ_USED_RESOLVE (which it can't see on REST submissions because it
+    reads the Deadline web service's env, not the submitter's).
+    """
+    resolve = os.environ.get("REZ_USED_RESOLVE")
+    if not resolve:
+        return []
+    # ResolveSep on this farm is "-", which is the form REZ_USED_RESOLVE
+    # already uses, so pass through verbatim.
+    pairs = [("DEADLINE_REZ_REQUEST_PACKAGES", resolve)]
+    try:
+        out = subprocess.check_output(
+            ["rez-context", "--tools"]
+        ).decode("utf-8").splitlines()
+        tools = [line.split()[0] for line in out[2:] if line.split()]
+    except (OSError, subprocess.CalledProcessError):
+        tools = []
+    # ``nuke`` must be present for the worker to wrap the Nuke plugin in
+    # rez-env; rez-context may not be on PATH from the submitter env, so
+    # we guarantee it rather than relying on the subprocess succeeding.
+    for required in ("nuke", "rez"):
+        if required not in tools:
+            tools.append(required)
+    pairs.append(("DEADLINE_REZ_TOOLS", " ".join(tools)))
+    return pairs
+
+
 def build_request(knobValues, temp_script_path, node):
     # Include critical environment variables with submission
     print("build_request")
     submissionEnvVars = [
+        "AYON_SERVER_URL",
+        "AYON_API_KEY",
+        "AYON_APP_NAME",
         "AYON_PROJECT_NAME",
+        "AYON_TASK_NAME",
         "AYON_FOLDER_PATH",
+        "AYON_HOST_NAME",
+        "AYON_USE_DEV",
+        "AYON_USE_STAGING",
         "HORNET_ROOT",
         "NUKE_PATH",
         "OCIO",
@@ -261,8 +305,8 @@ def build_request(knobValues, temp_script_path, node):
         "OFX_PLUGIN_PATH",
         "RVL_SERVER",
         "neatlab_LICENSE",
-        "AYON_USE_DEV",
-        "AYON_USE_STAGING"
+        "REZ_CONFIG_FILE",
+        "REZ_USED_RESOLVE",
     ]
     environment = dict(
         {k: os.environ[k] for k in submissionEnvVars if k in os.environ.keys()}
@@ -321,6 +365,17 @@ def build_request(knobValues, temp_script_path, node):
             for index, key in enumerate(environment)
         }
     )
+
+    rez_pairs = _rez_extra_info_pairs()
+    if rez_pairs:
+        n = sum(
+            1 for k in body["JobInfo"] if k.startswith("ExtraInfoKeyValue")
+        )
+        for i, (key, value) in enumerate(rez_pairs):
+            body["JobInfo"]["ExtraInfoKeyValue%d" % (n + i)] = (
+                "%s=%s" % (key, value)
+            )
+
     print(body)
     return body
 
