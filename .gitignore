@@ -1,6 +1,10 @@
 # Addon package directory
 /package/*
 
+# vendored ffmpeg (fetched by bootstrap_ffmpeg.py)
+client/ayon_nuke/vendor/ffmpeg/windows/
+client/ayon_nuke/vendor/ffmpeg/linux/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
