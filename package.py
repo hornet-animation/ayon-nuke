@@ -1,6 +1,5 @@
 name = "nuke"
 title = "Nuke"
-
 version = "0.4.0-hornet.46"
 
 app_host_name = "nuke"

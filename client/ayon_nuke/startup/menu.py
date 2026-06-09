@@ -47,6 +47,7 @@ import file_sequence
 import views_write
 from reload_hornet import reload_hornet_modules
 
+from ayon_core.pipeline import registered_host
 # Version Up Workfile import
 from ayon_core.pipeline.workfile import save_next_version as _save_next_version
 
@@ -224,7 +225,7 @@ def switchExtension():
 
     nde = nuke.thisNode()
     knb = nuke.thisKnob()
-    
+
     if nde is None or knb is None:
         return
 
@@ -356,3 +357,13 @@ nuke.menu("Nuke").addCommand(
     _save_next_version,
     "alt+shift+s"
 )
+
+
+# This code gets only called from GUI mode.
+# Unlike the non-GUI mode (e.g. farm),
+# we do expect a valid host at this time.
+nuke_host = registered_host()
+if nuke_host is None:
+    raise RuntimeError("Cannot find expected registered Nuke host.")
+
+nuke_host.setup_ui_callbacks_and_menu()

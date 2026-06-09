@@ -13,9 +13,6 @@ class CollectInstanceData(pyblish.api.InstancePlugin):
 
     settings_category = "nuke"
 
-    # presets
-    sync_workfile_version_on_product_base_types: list[str] = []
-
     def process(self, instance):
         product_base_type = instance.data["productBaseType"]
         product_type = instance.data['productType']
@@ -26,15 +23,6 @@ class CollectInstanceData(pyblish.api.InstancePlugin):
         resolution_height = format_.height()
         pixel_aspect = format_.pixelAspect()
 
-        # sync workfile version
-        if product_base_type in self.sync_workfile_version_on_product_base_types:  # noqa: E501
-            self.log.debug(
-                "Syncing version with workfile for '{}'".format(
-                    product_base_type
-                )
-            )
-            # get version to instance for integration
-            instance.data['version'] = instance.context.data['version']
 
         instance.data.update({
             "step": 1,
@@ -108,7 +96,7 @@ class CollectInstanceData(pyblish.api.InstancePlugin):
             self.log.debug(f"StagingDir: {instance.data.get('stagingDir')}")
         else:
             self.log.debug("staging dir not in instance data!")
-        
+
         strng = "\n" + '\n'.join([f"    {k}: {v}" for k, v in instance.data.items()])
 
 

@@ -1,9 +1,8 @@
 import os
+
 import nuke
 import pyblish.api
-
 from ayon_core.pipeline import publish
-
 from ayon_nuke import api as napi
 
 
@@ -38,9 +37,7 @@ class CollectNukeWrites(
 
         if write_node is None:
             self.log.warning(
-                "Created node '{}' is missing write node!".format(
-                    group_node.name()
-                )
+                "Created node '{}' is missing write node!".format(group_node.name())
             )
             return
 
@@ -51,9 +48,7 @@ class CollectNukeWrites(
             self._set_existing_files_data(instance, colorspace)
 
         elif render_target == "frames_farm":
-            collected_frames = self._set_existing_files_data(
-                instance, colorspace
-            )
+            collected_frames = self._set_existing_files_data(instance, colorspace)
 
             self._set_expected_files(instance, collected_frames)
 
@@ -70,8 +65,7 @@ class CollectNukeWrites(
         else:
             self.log.debug("staging dir not in instance data!")
         self.log.debug(
-            "\n"
-            + "\n".join([f"    {k}: {v}" for k, v in instance.data.items()])
+            "\n" + "\n".join([f"    {k}: {v}" for k, v in instance.data.items()])
         )
 
     def _set_existing_files_data(self, instance, colorspace):
@@ -115,8 +109,7 @@ class CollectNukeWrites(
         output_dir = os.path.dirname(write_file_path)
 
         instance.data["expectedFiles"] = [
-            os.path.join(output_dir, source_file)
-            for source_file in collected_frames
+            os.path.join(output_dir, source_file) for source_file in collected_frames
         ]
 
     def _get_frame_range_data(self, instance):
@@ -155,15 +148,12 @@ class CollectNukeWrites(
         self._frame_ranges[instance_name] = (first_frame, last_frame)
         return first_frame, last_frame
 
-
         # add to cache
         self._frame_ranges[instance_name] = (first_frame, last_frame)
 
         return first_frame, last_frame
 
-    def _set_additional_instance_data(
-        self, instance, render_target, colorspace
-    ):
+    def _set_additional_instance_data(self, instance, render_target, colorspace):
         """Set additional instance data.
 
         Args:
@@ -179,13 +169,13 @@ class CollectNukeWrites(
         if first_frame == last_frame:
             product_type = "image"
             instance.data["family"] = "image"
-            self.log.info(f"Single frame detected ({first_frame}) - treating as image product type")
+            self.log.info(
+                f"Single frame detected ({first_frame}) - treating as image product type"
+            )
 
         # add targeted family to families
         if render_target == "frames_farm":
-            instance.data["families"].append(
-                "{}.{}".format(product_type, "frames")
-            )
+            instance.data["families"].append("{}.{}".format(product_type, "frames"))
             self.log.debug(
                 "Hornet - Appending render target to families: {}.frames".format(
                     product_base_type
@@ -203,7 +193,9 @@ class CollectNukeWrites(
 
         write_node = self._write_node_helper(instance)
         if instance.data.get("stagingDir_is_custom", False):
-            self.log.info("Custom staging dir detected. Syncing write nodes output path.")
+            self.log.info(
+                "Custom staging dir detected. Syncing write nodes output path."
+            )
             napi.lib.writes_version_sync(write_node, self.log)
 
         # Determine defined file type
@@ -226,6 +218,34 @@ class CollectNukeWrites(
 
         # TODO: remove this when we have proper colorspace support
         version_data = {"colorspace": colorspace}
+        time_warp_node = _find_downstream_time_warp_node(
+            instance.data["transientData"]["node"]
+        )
+        if time_warp_node:
+            time_warp_dict = {
+                "Class": time_warp_node.Class(),
+                "name": time_warp_node["name"].value(),
+                "lookup": [],
+            }
+            lookup_knob = time_warp_node["lookup"]
+            for frame_number in range(
+                # Excluding handles to match the logic when
+                # loading timewarps - @splidje
+                int(nuke.root()["first_frame"].getValue()) + handle_start,
+                int(nuke.root()["last_frame"].getValue()) - handle_end + 1,
+            ):
+                # The format for this lookup list is
+                # the frame offset per frame
+                # - rather than the absolute input frame number.
+                time_warp_dict["lookup"].append(
+                    lookup_knob.valueAt(frame_number) - frame_number
+                )
+            version_data.update(
+                {
+                    "retime": True,
+                    "timewarps": [time_warp_dict],
+                }
+            )
 
         instance.data.update(
             {
@@ -235,20 +255,23 @@ class CollectNukeWrites(
                 "ext": ext,
                 "colorspace": colorspace,
                 "color_channels": color_channels,
-                "resolutionWidth": write_node.format().width(),
-                "resolutionHeight": write_node.format().height(),
+                "resolutionWidth": write_node.width(),
+                "resolutionHeight": write_node.height(),
+                "pixelAspect": write_node.pixelAspect(),
             }
         )
 
         if product_base_type == "render":
-            instance.data.update({
-                "handleStart": handle_start,
-                "handleEnd": handle_end,
-                "frameStart": first_frame + handle_start,
-                "frameEnd": last_frame - handle_end,
-                "frameStartHandle": first_frame,
-                "frameEndHandle": last_frame,
-            })
+            instance.data.update(
+                {
+                    "handleStart": handle_start,
+                    "handleEnd": handle_end,
+                    "frameStart": first_frame + handle_start,
+                    "frameEnd": last_frame - handle_end,
+                    "frameStartHandle": first_frame,
+                    "frameEndHandle": last_frame,
+                }
+            )
         else:
             instance.data.update(
                 {
@@ -361,9 +384,7 @@ class CollectNukeWrites(
 
         # set slate frame
         collected_frames = self._add_slate_frame_to_collected_frames(
-            instance,
-            collected_frames,
-            first_frame
+            instance, collected_frames, first_frame
         )
 
         if len(collected_frames) == 1:
@@ -387,10 +408,7 @@ class CollectNukeWrites(
         return ("{{:0{}d}}".format(len(str(last_frame)))).format(first_frame)
 
     def _add_slate_frame_to_collected_frames(
-        self,
-        instance,
-        collected_frames,
-        first_frame
+        self, instance, collected_frames, first_frame
     ):
         """Add slate frame to collected frames.
 
@@ -469,9 +487,7 @@ class CollectNukeWrites(
         )
 
         # convert only to base names
-        expected_filenames = {
-            os.path.basename(filepath) for filepath in expected_paths
-        }
+        expected_filenames = {os.path.basename(filepath) for filepath in expected_paths}
 
         # make sure files are existing at folder
         if os.path.exists(output_dir):
@@ -485,3 +501,12 @@ class CollectNukeWrites(
             collected_frames = []
 
         return collected_frames
+
+
+def _find_downstream_time_warp_node(start_node):
+    # HACK: no idea why calling `dependentNodes` the first time
+    # seems to always return nothing.
+    nuke.dependentNodes(nuke.INPUTS, [start_node])
+    for node in nuke.dependentNodes(nuke.INPUTS, [start_node]):
+        if node.Class() == "TimeWarp":
+            return node
