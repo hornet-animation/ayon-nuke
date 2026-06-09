@@ -35,3 +35,15 @@ in place when the release zip is built.
 
 running create_package.py to build a new addon release will not result in working review generation unless the vendored folders are setup correctly
 
+
+# Release workflow
+
+`.github/workflows/hornet_package_release.yml` runs on every push to `develop`
+(and on manual dispatch). It bumps the `-hornet.N` suffix in `package.py` /
+`client/ayon_nuke/version.py`, vendors ffmpeg, runs `create_package.py`,
+publishes a GitHub Release with the zip, and commits the bump back.
+
+Version format: `X.Y.Z-hornet.N` — `X.Y.Z` tracks upstream AYON (rebased by the
+sync workflow via the `upstream_version` input), `N` increments per release.
+
+When merging in changes from upstream, this is the only content in `package.py` and `version.py` that need to be changed
