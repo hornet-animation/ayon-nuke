@@ -20,17 +20,17 @@ _VENDORED_FFMPEG = os.path.normpath(_VENDORED_FFMPEG)
 FFMPEG_EXE = _VENDORED_FFMPEG if os.path.isfile(_VENDORED_FFMPEG) else "ffmpeg"
 
 
-# (color_primaries, color_trc, colorspace) per delivery target.
-# Describes the bytes in the encoded file, independent of which OCIO config
-# produced them — names will not drift across configs.
+# ITU-T H.273 numeric codes for (color_primaries, color_trc, colorspace).
+# Numbers — not names — because the *_metadata bitstream filters only accept
+# numeric, and ffmpeg's -color_* flags accept either form.
 DELIVERY_TAGS = {
-    "rec709":      ("bt709",   "bt709",        "bt709"),
-    "srgb":        ("bt709",   "iec61966-2-1", "bt709"),
-    "rec2020_sdr": ("bt2020",  "bt2020-10",    "bt2020nc"),
-    "rec2020_pq":  ("bt2020",  "smpte2084",    "bt2020nc"),
-    "rec2020_hlg": ("bt2020",  "arib-std-b67", "bt2020nc"),
-    "p3_d65":      ("smpte432", "bt709",       "bt709"),
-    "linear":      ("bt709",   "linear",       "bt709"),
+    "rec709":      (1,  1, 1),   # bt709    / bt709         / bt709
+    "srgb":        (1, 13, 1),   # bt709    / iec61966-2-1  / bt709
+    "rec2020_sdr": (9, 14, 9),   # bt2020   / bt2020-10     / bt2020nc
+    "rec2020_pq":  (9, 16, 9),   # bt2020   / smpte2084     / bt2020nc
+    "rec2020_hlg": (9, 18, 9),   # bt2020   / arib-std-b67  / bt2020nc
+    "p3_d65":      (12, 1, 1),   # smpte432 / bt709         / bt709
+    "linear":      (1,  8, 1),   # bt709    / linear        / bt709
 }
 
 # Codec + delivery combinations that use full-range YUV. ProRes / DNxHD are
@@ -38,6 +38,17 @@ DELIVERY_TAGS = {
 # deliveries want so blacks aren't crushed into 16-235.
 _FLEX_RANGE_CODECS = {"libx264", "libx265", "libsvtav1", "mjpeg"}
 _PC_RANGE_DELIVERIES = {"srgb", "linear"}
+
+# Each *_metadata bitstream filter rewrites the codec's own VUI / frame
+# header post-encode, which is what players actually trust for colour.
+# Container ``colr`` / ``nclc`` atoms alone are unreliable: libx264/x265
+# don't write video_full_range_flag from -color_range, and prores_ks
+# doesn't propagate -color_primaries/-color_trc/-colorspace at all.
+_METADATA_BSF = {
+    "libx264":   "h264_metadata",
+    "libx265":   "hevc_metadata",
+    "prores_ks": "prores_metadata",
+}
 
 
 # (codec_config key, ffmpeg flag, allow_zero).
@@ -295,21 +306,38 @@ class FFMpegBuilder:
         # extra_args so a profile can still override any of them explicitly.
         # Range is derived from codec + delivery: ProRes / DNxHD stay tv-range,
         # h264/h265/AV1 use full range for sRGB / linear deliveries so blacks
-        # aren't crushed.
+        # aren't crushed. The bitstream filter rewrites the codec's own VUI /
+        # frame header so players that ignore the container ``colr`` atom
+        # still see the right tags.
         delivery = self._delivery
         tags = DELIVERY_TAGS.get(delivery) if delivery and delivery != "none" else None
         if tags:
-            primaries, trc, matrix = tags
+            p, t, m = tags
             use_pc = (
                 enc.get("codec") in _FLEX_RANGE_CODECS
                 and delivery in _PC_RANGE_DELIVERIES
             )
             cmd.extend([
                 "-color_range", "pc" if use_pc else "tv",
-                "-color_primaries", primaries,
-                "-color_trc", trc,
-                "-colorspace", matrix,
+                "-color_primaries", str(p),
+                "-color_trc", str(t),
+                "-colorspace", str(m),
             ])
+
+            bsf = _METADATA_BSF.get(enc.get("codec"))
+            if bsf == "prores_metadata":
+                # No color_matrix option: prores frame headers carry only
+                # primaries + trc; matrix coefficients are implied by codec.
+                cmd.extend(["-bsf:v",
+                    f"prores_metadata=color_primaries={p}:color_trc={t}"
+                ])
+            elif bsf:
+                cmd.extend(["-bsf:v",
+                    f"{bsf}=video_full_range_flag={1 if use_pc else 0}"
+                    f":colour_primaries={p}"
+                    f":transfer_characteristics={t}"
+                    f":matrix_coefficients={m}"
+                ])
 
         if framerate:
             cmd.extend(["-r", str(framerate)])

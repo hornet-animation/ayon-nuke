@@ -365,15 +365,14 @@ class ExtractFFmpegReview(
                 if output_colorspace:
                     read["colorspace"].setValue(output_colorspace)
 
-                # Pin the Read's playable range to publishStart/publishEnd so
-                # it lines up with the source's publish range in the timeline.
-                # ``start at`` remaps file-internal frame 1 to ``frame_start``.
-                if frame_end is not None:
-                    fs, fe = int(start_frame), int(frame_end)
-                    read["first"].setValue(fs)
-                    read["last"].setValue(fe)
-                    read["origfirst"].setValue(fs)
-                    read["origlast"].setValue(fe)
+                # Movie files number internally from 1..frame_count; ``start
+                # at`` then remaps internal frame 1 onto the timeline at fs.
+                if frame_end is not None and frame_count is not None:
+                    fs = int(start_frame)
+                    read["first"].setValue(1)
+                    read["last"].setValue(frame_count)
+                    read["origfirst"].setValue(1)
+                    read["origlast"].setValue(frame_count)
                     read["frame_mode"].setValue("start at")
                     read["frame"].setValue(str(fs))
 
