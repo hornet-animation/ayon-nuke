@@ -363,11 +363,35 @@ def assemble_publish_path(ayon_write_node):
         result = pathlib.Path(result)
     else:
         # For sequences, add frame range
-        fs = SequenceFactory.from_sequence_string_absolute(result)
-        result = (
+        fs = SequenceFactory.from_sequence_string_absolute(
+            str(result), min_frames=1
+        )
+        if fs is None:
+            # The integrator may have written file names with a different
+            # publish template than "render" (e.g. "default" prefixes the
+            # project code), so fall back to the sequence with a matching
+            # extension in the version folder.
+            candidates = [
+                s
+                for s in SequenceFactory.from_directory(
+                    publish_path, min_frames=1
+                )
+                if s.extension == extension
+            ]
+            if len(candidates) == 1:
+                fs = candidates[0]
+            else:
+                msg = (
+                    f"No published sequence matching '{result.name}' in "
+                    f"{publish_path}. Sequences found there: "
+                    f"{[s.sequence_string() for s in candidates] or 'none'}"
+                )
+                print(msg)
+                log.error(msg)
+                return None
+        result = pathlib.Path(
             f"{fs.absolute_file_name} {fs.first_frame}-{fs.last_frame}"
         )
-        result = pathlib.Path(result)
 
     print(result)
     log.debug(f"Assembled publish path:{result}")
@@ -444,9 +468,10 @@ def navigate_to_publish(write_node):
     """
 
     path = assemble_publish_path(write_node)
-    path = path if path.is_dir() else path.parent
     if not path:
         return
+
+    path = path if path.is_dir() else path.parent
     
     if not path.exists():
         print("absolutely no publishes were discovered.")
