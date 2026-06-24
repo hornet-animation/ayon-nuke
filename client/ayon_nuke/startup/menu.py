@@ -16,7 +16,6 @@ import os
 import json
 import quick_write
 import read_node_utils
-from view_manager import show as show_view_manager
 from quick_write import (
     embedOptions,
     presets,
@@ -28,6 +27,7 @@ from quick_write import (
     update_ovs_write_version,
     _quick_write_node,
     render_or_submit,
+    report_obsolete_nodes,
 )
 from hornet_deadline_utils import deadlineNetworkSubmit
 from hornet_publish_utils import quick_publish
@@ -309,6 +309,11 @@ m.addCommand(
         "views_write.views_write_node(_quick_write_node)",
         tooltip="Create a views write node that generates write nodes for all views",
 )
+m.addCommand(
+        "Report Obsolete Write Nodes",
+        "report_obsolete_nodes()",
+        tooltip="List AYON write nodes whose stamped addon version is out of date",
+)
 
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")
@@ -327,30 +332,8 @@ nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
 nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
 nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
 
-### View Manager
-
-toolbar = nuke.toolbar("Nodes")
-toolbar.addCommand("Alex Dev / View Manager", "show_view_manager()")
-
-
-### Project Gizmos
-
-PROJECT_NAME = os.environ["AYON_PROJECT_NAME"]
-
-from node_manager import NodeLoader
-
-nodes_toolbar = nuke.toolbar("Nodes")
-project_toolbar = nodes_toolbar.addMenu(PROJECT_NAME)
-
-node_loader = NodeLoader()
-
-project_toolbar.addCommand(
-    name="Add Selected Nodes", command="node_loader.add_selected_nodes()"
-)
-project_toolbar.addCommand(
-    name="Add Toolset", command="node_loader.add_toolset()"
-)
-project_toolbar.addCommand(name="Reload", command="node_loader.populate()")
+# Restore the 'File output' multiline knob height, which Nuke drops on reload.
+nuke.addOnCreate(quick_write.restore_file_output_height, nodeClass="Group")
 
 nuke.menu("Nuke").addCommand(
     "File/Version Up Workfile",

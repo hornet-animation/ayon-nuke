@@ -4,14 +4,12 @@ import sys
 # List of all startup modules to reload
 HORNET_MODULES = [
     "quick_write",
-    "read_node_utils", 
-    "view_manager",
+    "read_node_utils",
     "hornet_deadline_utils",
     "hornet_publish_utils",
     "file_sequence",
     "file_sequence.file_sequence",
     "views_write",
-    "node_manager",
     "custom_write_node",
     "clear_rendered",
     "frame_setting_for_read_nodes",

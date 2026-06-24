@@ -7,6 +7,7 @@ from ayon_core.lib import Logger
 from ayon_core.settings import get_current_project_settings
 
 import ayon_nuke.api.lib as lib
+from ayon_nuke.version import __version__ as ADDON_VERSION
 from hornet_deadline_utils import save_script_with_render, deadlineNetworkSubmit
 
 from ayon_nuke.api.lib import (
@@ -22,6 +23,12 @@ except ImportError:
 
 
 log = Logger.get_logger(__name__)
+
+# Hidden knob that stamps the AYON nuke addon (bundle) version that created
+# the node. Sourced from ayon_nuke.version.__version__, which create_package.py
+# rewrites from package.py on every build -- so a version bump + rebuild updates
+# this automatically for newly created nodes, with no edits here.
+ADDON_VERSION_KNOB = "hornet_addon_version"
 
 # dict mapping extension to list of exposed parameters from write node to top level group node
 knobMatrix = {
@@ -179,6 +186,12 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
     )
     if family == "prerender":
         qnode.knob("tile_color").setValue(2880113407)
+
+    # Stamp the bundle version BEFORE the file_type set below: that set triggers
+    # embedOptions, which builds the visible version display by reading this
+    # knob. The knob is in DONT_DELETE, so it survives embedOptions' purge.
+    stamp_addon_version(qnode)
+
     with qnode.begin():
         inside_write = nuke.toNode(
             "inside_" + family + os.environ["AYON_TASK_NAME"] + variant.title()
@@ -191,8 +204,72 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
     return qnode
 
 
+def stamp_addon_version(node):
+    """Add/refresh a hidden knob recording the addon version on `node`.
+
+    The value is the addon version active when the node is created. It is not
+    auto-updated on load, so an old node opened after an update still reports
+    the version it was made with -- which is the point for regression testing.
+    """
+    knob = node.knob(ADDON_VERSION_KNOB)
+    if knob is None:
+        knob = nuke.String_Knob(ADDON_VERSION_KNOB, "AYON Nuke Addon Version")
+        knob.setVisible(False)
+        node.addKnob(knob)
+    knob.setValue(ADDON_VERSION)
+
+    # Refresh the visible label too, in case it was built (by embedOptions)
+    # before this stamp existed.
+    display = node.knob("addon_version_display")
+    if display is not None:
+        display.setValue(_format_version_display(ADDON_VERSION))
+
+
+def _format_version_display(version_string):
+    """Grey HTML label text for the visible addon-version knob."""
+    return "<font color='#808080'>addon {}</font>".format(
+        version_string or "unstamped"
+    )
+
+
+def restore_file_output_height():
+    """Fix the 'File output' multiline knob collapsing to one line on reload.
+
+    Nuke does not persist the editor height of a Multiline_Eval_String_Knob that
+    was added at runtime (inside embedOptions' knobChanged), so on script load it
+    renders as a single line. A freshly added multiline knob gets its normal
+    multi-line height, so we rebuild just that knob in place: remove everything
+    from 'File output' to the end of the panel and re-add it, recreating only the
+    multiline knob fresh while re-adding the rest as-is (values and order kept).
+
+    Registered as an onCreate handler; a no-op on nodes without the panel.
+    """
+    group = nuke.thisNode()
+    if group is None or "publish_instance" not in group.knobs():
+        return
+
+    knobs = group.allKnobs()
+    names = [k.name() for k in knobs]
+    if "File output" not in names:
+        # Panel not built yet (e.g. onCreate during initial creation) -- nothing
+        # to restore; embedOptions will build it at proper height.
+        return
+
+    tail = knobs[names.index("File output"):]
+    for knob in tail:
+        group.removeKnob(knob)
+    for knob in tail:
+        if knob.name() == "File output":
+            fresh = nuke.Multiline_Eval_String_Knob("File output")
+            fresh.setValue(knob.value())
+            group.addKnob(fresh)
+        else:
+            group.addKnob(knob)
+
+
 DONT_DELETE = [
     api.INSTANCE_DATA_KNOB,
+    ADDON_VERSION_KNOB,
 ]
 
 
@@ -441,6 +518,18 @@ def embedOptions():
     endGroup = nuke.Tab_Knob("endpipeline", None, nuke.TABENDGROUP)
 
     group.addKnob(endGroup)
+
+    # Visible, read-only addon-version stamp at the very bottom of the panel.
+    # Text_Knob is a label (not editable); the value renders HTML, so we grey
+    # it out. Sourced from the hidden ADDON_VERSION_KNOB so it reflects the
+    # bundle that created the node, not the currently-running one.
+    stamp_knob = group.knob(ADDON_VERSION_KNOB)
+    stamped_version = stamp_knob.value().strip() if stamp_knob else ""
+    version_display = nuke.Text_Knob("addon_version_display", "")
+    version_display.setValue(_format_version_display(stamped_version))
+    version_display.setFlag(nuke.STARTLINE)
+    group.addKnob(version_display)
+
     try:
         group["views"].setValue(nuke.views()[0])
     except Exception as e:
@@ -546,15 +635,6 @@ def embed_quick_publish():
         )
         burnin_checkbox.setFlag(nuke.STARTLINE)
 
-
-    # Add the info button
-    show_info_button = nuke.PyScript_Knob(
-        "show_info",
-        "Show Info",
-        "quick_write.show_quick_publish_info()",
-    )
-    show_info_button.setTooltip("Display information window")
-
     group.addKnob(quick_publish_tab)
     group.addKnob(publish_on_farm_checkbox)
 
@@ -562,8 +642,6 @@ def embed_quick_publish():
     if not is_prerender:
         group.addKnob(generate_review_checkbox)
         group.addKnob(burnin_checkbox)
-
-    group.addKnob(show_info_button)
 
 
 
@@ -706,6 +784,10 @@ def update_ovs_write_version(node):
                         if wnode is not None:
                             wnode["file"].setValue(fpath_new)
                             node["File output"].setValue(fpath_new)
+                            # Re-stamp: records the addon version that last
+                            # re-pointed this OVS node, and backfills the knob
+                            # on older OVS nodes created before stamping existed.
+                            stamp_addon_version(node)
                             log.info(
                                 f"Updating ovs write path for {node_name}: {fpath_new}"
                             )
@@ -727,6 +809,37 @@ def update_ovs_write_version(node):
         log.debug(
             f"{node.name()} is missing instance data knob, cannot set version"
         )
+
+
+def report_obsolete_nodes():
+    """Scan the script and pop up the AYON write nodes that are out of date.
+
+    A node is considered obsolete when its stamped addon version differs from
+    the current ADDON_VERSION, or when it carries no stamp at all (created
+    before stamping existed). Intended for checking extant nodes in a script
+    after an addon update has been deployed.
+    """
+    obsolete = []
+    for node in get_all_ayon_write_nodes():
+        knob = node.knob(ADDON_VERSION_KNOB)
+        stamped = knob.value().strip() if knob else ""
+        if stamped == ADDON_VERSION:
+            continue
+        obsolete.append((node.name(), stamped or "<unstamped>"))
+
+    if not obsolete:
+        nuke.message(
+            f"All AYON write nodes are up to date (addon {ADDON_VERSION})."
+        )
+        return obsolete
+
+    obsolete.sort()
+    lines = "\n".join(f"  {name}  —  {ver}" for name, ver in obsolete)
+    nuke.message(
+        f"Current addon version: {ADDON_VERSION}\n\n"
+        f"{len(obsolete)} obsolete write node(s) found:\n\n{lines}"
+    )
+    return obsolete
 
 
 def get_all_ayon_write_nodes():

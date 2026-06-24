@@ -359,8 +359,31 @@ def assemble_publish_path(ayon_write_node):
 
     if is_single_frame:
         # For single frames, remove frame number from path
-        result = str(result).replace(".%04d", "")
-        result = pathlib.Path(result)
+        result = pathlib.Path(str(result).replace(".%04d", ""))
+        if not result.exists():
+            # The integrator may have written the file with a different publish
+            # template than "render" (e.g. "default" prefixes the project
+            # code), so the render-template name won't exist on disk. Fall back
+            # to the single matching-extension file in the version folder -
+            # mirrors the sequence-branch fallback below.
+            candidates = sorted(
+                p for p in publish_path.glob("*.{}".format(extension))
+                if p.is_file()
+            )
+            if len(candidates) == 1:
+                result = candidates[0]
+            else:
+                msg = (
+                    "No published single frame matching '{}' in {}. "
+                    "Files found: {}".format(
+                        result.name,
+                        publish_path,
+                        [p.name for p in candidates] or "none",
+                    )
+                )
+                print(msg)
+                log.error(msg)
+                return None
     else:
         # For sequences, add frame range
         fs = SequenceFactory.from_sequence_string_absolute(
@@ -399,6 +422,23 @@ def assemble_publish_path(ayon_write_node):
     return result
 
 
+def find_review_media(publish_dir):
+    """Return published review movie files in a version folder.
+
+    Looks for single-file movie formats (mov/mp4/...) directly in the version
+    directory, where ExtractFFmpegReview's deliverables are integrated. Returns
+    an empty list if the directory is missing or holds no movies.
+    """
+    if publish_dir is None or not publish_dir.exists():
+        return []
+
+    movies = []
+    for ext in SINGLE_FILE_FORMATS:
+        movies.extend(publish_dir.glob("*.{}".format(ext)))
+
+    return sorted(p.as_posix() for p in movies if p.is_file())
+
+
 def read_from_publish(ayon_write_node, context = None, xypos = None):
     if (ayon_write_node) is None:
         log.error("ayon_write_node is None")
@@ -428,6 +468,20 @@ def read_from_publish(ayon_write_node, context = None, xypos = None):
                 int(ayon_write_node["xpos"].getValue()),
                 int(ayon_write_node["ypos"].getValue()) + 60,
             )
+
+        # Also pull in any published review media that sits in the same version
+        # folder. fromUserText lets Nuke discover the movie's frame range, so we
+        # don't set first/last ourselves.
+        review_xpos = read_node.xpos()
+        review_ypos = read_node.ypos()
+        for offset, movie_path in enumerate(
+            find_review_media(ppath.parent), start=1
+        ):
+            review_read = nuke.nodes.Read()
+            review_read["file"].fromUserText(movie_path)
+            review_read.setXYpos(review_xpos + offset * 100, review_ypos)
+            log.info(f"Read review media from publish: {movie_path}")
+
         return read_node
 
 
