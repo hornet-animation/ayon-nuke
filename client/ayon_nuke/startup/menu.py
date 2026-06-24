@@ -19,14 +19,13 @@ import read_node_utils
 from quick_write import (
     embedOptions,
     presets,
-    embed_quick_publish,
-    show_quick_publish_info,
     quick_publish_wrapper,
     quick_write_node,
     ovs_write_node,
     update_ovs_write_version,
     _quick_write_node,
     render_or_submit,
+    set_ranges_to_globals,
     report_obsolete_nodes,
 )
 from hornet_deadline_utils import deadlineNetworkSubmit
@@ -304,11 +303,13 @@ m.addCommand(
     "quick_write_node(family='image')"
 )
 m.addCommand("&Oversized Write Node", "ovs_write_node()")
-m.addCommand(
-        "Views Write Node",
-        "views_write.views_write_node(_quick_write_node)",
-        tooltip="Create a views write node that generates write nodes for all views",
-)
+# Views Write Node temporarily disabled -- migrating to another package.
+# Keep the code/registration here for now; just don't expose the menu entry.
+# m.addCommand(
+#         "Views Write Node",
+#         "views_write.views_write_node(_quick_write_node)",
+#         tooltip="Create a views write node that generates write nodes for all views",
+# )
 m.addCommand(
         "Report Obsolete Write Nodes",
         "report_obsolete_nodes()",
@@ -318,7 +319,6 @@ m.addCommand(
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")
 nuke.addKnobChanged(embedOptions, nodeClass="Write")
-nuke.addKnobChanged(embed_quick_publish, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
 nuke.addKnobChanged(warnSingleFrame, nodeClass="Write")
 nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
@@ -330,7 +330,8 @@ nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
 
 
 nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
-nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
+# Views Write Node temporarily disabled -- migrating to another package.
+# nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
 
 # Restore the 'File output' multiline knob height, which Nuke drops on reload.
 nuke.addOnCreate(quick_write.restore_file_output_height, nodeClass="Group")

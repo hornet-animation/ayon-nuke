@@ -380,9 +380,21 @@ def embedOptions():
         "beginpipeline", "Rendering and Pipeline", nuke.TABBEGINGROUP
     )
     group.addKnob(beginGroup)
+    set_globals_button = nuke.PyScript_Knob(
+        "set_globals",
+        "Set to Globals",
+        "set_ranges_to_globals(nuke.thisNode())",
+    )
+    set_globals_button.clearFlag(nuke.STARTLINE)
+    set_globals_button.setTooltip(
+        "Set both the render frame range and the publish range to the "
+        "script's global frame range."
+    )
+
     group.addKnob(framelist)
     group.addKnob(publishFirst)
     group.addKnob(publishLast)
+    group.addKnob(set_globals_button)
 
     renderInterval = nuke.Int_Knob("renderInterval", "Render every")
     renderInterval.setValue(1)
@@ -469,7 +481,7 @@ def embedOptions():
     )
     quick_publish_button = nuke.PyScript_Knob(
         "quick_publish",
-        "Quick Publish",
+        "Publish",
         "quick_publish_wrapper(nuke.thisNode())",
     )
     deadlineChunkSize.setValue(1)
@@ -519,6 +531,61 @@ def embedOptions():
 
     group.addKnob(endGroup)
 
+    # --- Quick Publish settings (formerly the separate embed_quick_publish
+    # knobChanged callback, now built inline so the version label can sit last).
+    is_prerender = False
+    try:
+        qp_data = json.loads(
+            group.knobs()["publish_instance"].value().replace("JSON:::", "", 1)
+        )
+        is_prerender = qp_data.get("productBaseType", "") == "prerender"
+    except (KeyError, TypeError, ValueError):
+        is_prerender = False
+
+    quick_publish_begin = nuke.Tab_Knob(
+        "quick_publish_tab", "Quick Publish - Settings", nuke.TABBEGINGROUP
+    )
+    publish_on_farm_checkbox = nuke.Boolean_Knob(
+        "publish_on_farm", "Publish on Farm"
+    )
+    publish_on_farm_checkbox.setValue(False)
+    publish_on_farm_checkbox.setTooltip(
+        "Run the full publish on the farm, including review media "
+        "generation. Unchecked runs the publish (and review extraction) "
+        "locally."
+    )
+    publish_on_farm_checkbox.setFlag(nuke.STARTLINE)
+
+    group.addKnob(quick_publish_begin)
+    group.addKnob(publish_on_farm_checkbox)
+
+    # Review options only make sense for non-prerender nodes.
+    if not is_prerender:
+        generate_review_checkbox = nuke.Boolean_Knob(
+            "generate_review_media", "Generate Review Media"
+        )
+        generate_review_checkbox.setValue(True)
+        generate_review_checkbox.setTooltip(
+            "Generate review media (mp4/mov) for the rendered sequence. "
+            "Unchecked skips ExtractFFmpegReview entirely."
+        )
+        generate_review_checkbox.setFlag(nuke.STARTLINE)
+
+        burnin_checkbox = nuke.Boolean_Knob("burnin", "Apply burnins to Review")
+        burnin_checkbox.setValue(True)
+        burnin_checkbox.setTooltip(
+            "Add burnin information (timecode, frame numbers, etc.) to "
+            "review media. Unchecked disables burnins."
+        )
+        burnin_checkbox.setFlag(nuke.STARTLINE)
+
+        group.addKnob(generate_review_checkbox)
+        group.addKnob(burnin_checkbox)
+
+    group.addKnob(
+        nuke.Tab_Knob("quick_publish_end", None, nuke.TABENDGROUP)
+    )
+
     # Visible, read-only addon-version stamp at the very bottom of the panel.
     # Text_Knob is a label (not editable); the value renders HTML, so we grey
     # it out. Sourced from the hidden ADDON_VERSION_KNOB so it reflects the
@@ -534,114 +601,6 @@ def embedOptions():
         group["views"].setValue(nuke.views()[0])
     except Exception as e:
         print(f"Error setting views: {e}")
-
-
-
-
-def show_quick_publish_info():
-    """
-    Show a simple info window with text content.
-    """
-    # Your info text - customize this as needed
-    info_text = """
-Quick Publish
-
-Experimental alternative to the ayon ui for submitting publishes.
-
-"Publish on Farm" controls where the entire publish runs:
-  - Unchecked: publish (and review media generation) runs locally. Nuke
-    will freeze until complete; large transfers can take a while but Nuke
-    has probably not crashed.
-  - Checked: publish runs remotely on the farm, including review media.
-
-"Generate Review Media" toggles the ExtractFFmpegReview step entirely.
-When unchecked, no .mov/.mp4 review media is produced.
-
-"Apply burnins to Review" toggles burn-in overlays (timecode, frame
-counter, shot/version metadata) on the review media.
-    """
-
-    nuke.message(info_text)
-
-
-def embed_quick_publish():
-    """
-    Creates the Quick Publish tab with options for publishing renders and generating review media.
-    """
-    nde = nuke.thisNode()
-    knb = nuke.thisKnob()
-
-    # Only run when file_type knob changes, to avoid multiple calls
-    if knb != nde.knob("file_type"):
-        return
-
-    # div = nuke.Text_Knob("div", "", "")
-    # Get the parent group node
-    group = nuke.toNode(".".join(["root"] + nde.fullName().split(".")[:-1]))
-
-    # Check if quick publish tab already exists
-    if "quick_publish_tab" in group.knobs():
-        return
-
-    # Create the Quick Publish tab
-    quick_publish_tab = nuke.Tab_Knob(
-        "quick_publish_tab",
-        "Quick Publish - Settings",
-        nuke.TABBEGINGROUP,
-    )
-
-    # Check if this is a prerender node to skip review options
-    is_prerender = False
-    try:
-        data = json.loads(
-            group.knobs()["publish_instance"].value().replace("JSON:::", "", 1)
-        )
-        product_type = data.get("productBaseType", "")
-        is_prerender = product_type == "prerender"
-    except (KeyError, TypeError, ValueError):
-        is_prerender = False
-
-    # Create checkboxes
-    publish_on_farm_checkbox = nuke.Boolean_Knob(
-        "publish_on_farm", "Publish on Farm"
-    )
-    publish_on_farm_checkbox.setValue(False)
-    publish_on_farm_checkbox.setTooltip(
-        "Run the full publish on the farm, including review media "
-        "generation. Unchecked runs the publish (and review extraction) "
-        "locally."
-    )
-    publish_on_farm_checkbox.setFlag(nuke.STARTLINE)
-
-    # Only create review related for non prerender nodes
-    if not is_prerender:
-        generate_review_checkbox = nuke.Boolean_Knob(
-            "generate_review_media", "Generate Review Media"
-        )
-        generate_review_checkbox.setValue(True)
-        generate_review_checkbox.setTooltip(
-            "Generate review media (mp4/mov) for the rendered sequence. "
-            "Unchecked skips ExtractFFmpegReview entirely."
-        )
-        generate_review_checkbox.setFlag(nuke.STARTLINE)
-
-        burnin_checkbox = nuke.Boolean_Knob(
-            "burnin", "Apply burnins to Review"
-        )
-        burnin_checkbox.setValue(True)
-        burnin_checkbox.setTooltip(
-            "Add burnin information (timecode, frame numbers, etc.) to "
-            "review media. Unchecked disables burnins."
-        )
-        burnin_checkbox.setFlag(nuke.STARTLINE)
-
-    group.addKnob(quick_publish_tab)
-    group.addKnob(publish_on_farm_checkbox)
-
-    # Only add review related knobs for non prerender nodes
-    if not is_prerender:
-        group.addKnob(generate_review_checkbox)
-        group.addKnob(burnin_checkbox)
 
 
 
@@ -718,6 +677,27 @@ def get_frame_range_with_interval(node):
         return (
             f"{int(nuke.root().firstFrame())}-{int(nuke.root().lastFrame())}"
         )
+
+
+def set_ranges_to_globals(node):
+    """Set the render frame range and the publish range to the script globals.
+
+    Drives the linked render first/last (which propagate to the interior write),
+    the 'Frame List' string, and the publish start/end from root first/last.
+    """
+    first = int(nuke.root().firstFrame())
+    last = int(nuke.root().lastFrame())
+
+    for knob_name, value in (
+        ("first", first),
+        ("last", last),
+        ("framelist", "{}-{}".format(first, last)),
+        ("publishFirst", first),
+        ("publishLast", last),
+    ):
+        knob = node.knob(knob_name)
+        if knob is not None:
+            knob.setValue(value)
 
 
 def render_or_submit(node, local=False):
