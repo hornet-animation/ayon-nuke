@@ -44,7 +44,7 @@ universalKnobs = ["colorspace", "views", "raw"]
 knobMatrix = {key: universalKnobs + value for key, value in knobMatrix.items()}
 presets = {
     "exr": [
-        ("channels", "all"),
+        ("channels", "rgba"),
         ("datatype", "16 bit half"),
     ],
     "png": [
@@ -165,7 +165,7 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
     instance_data.pop("version", None)
     instance_data["task"] = os.environ["AYON_TASK_NAME"]
     instance_data["creator_attributes"] = {
-        "render_taget": "frames_farm",
+        "render_target": "frames_farm",
         "review": True,
     }
     instance_data["publish_attributes"] = {
@@ -200,6 +200,10 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
             inside_write.knob("file_type").setValue("exr")
         else:
             inside_write.knob("file_type").setValue("dpx")
+
+    # Show the latest published version on the node in the DAG. The TCL
+    # expression evaluates the read-only 'publish_version' knob live.
+    qnode.knob("label").setValue("publish version: [value publish_version]")
 
     return qnode
 
@@ -392,8 +396,6 @@ def embedOptions():
     )
 
     group.addKnob(framelist)
-    group.addKnob(publishFirst)
-    group.addKnob(publishLast)
     group.addKnob(set_globals_button)
 
     renderInterval = nuke.Int_Knob("renderInterval", "Render every")
@@ -493,7 +495,7 @@ def embedOptions():
 
     usePublishRange.setFlag(nuke.STARTLINE)
     submit_to_deadline.setFlag(nuke.STARTLINE)
-    publishFirst.clearFlag(nuke.STARTLINE)
+    publishFirst.setFlag(nuke.STARTLINE)
     publishLast.clearFlag(nuke.STARTLINE)
     render_local_button.setFlag(nuke.STARTLINE)
     deadlinePriority.setFlag(nuke.STARTLINE)
@@ -503,8 +505,11 @@ def embedOptions():
 
     group.addKnob(render_local_button)
 
+    # Read From Rendered works for OVS too: write_to_read reads the write's own
+    # file path, which for OVS is the publish location it renders straight to.
+    group.addKnob(readfrom)
+
     if not is_ovs:
-        group.addKnob(readfrom)
         group.addKnob(clear_temp_outputs_button)
         group.addKnob(navigate_to_render_button)
 
@@ -516,20 +521,16 @@ def embedOptions():
     group.addKnob(deadlinePool)
     group.addKnob(deadlineGroup)
     group.addKnob(submit_to_deadline)
-    group.addKnob(div)
-    group.addKnob(quick_publish_button)
-    group.addKnob(read_from_publish_button)
-    group.addKnob(navigate_to_publish_button)
-
-    if is_ovs is False:
-        group.addKnob(tempwarn)
-
-    else:
-        group.addKnob(ovswarn)
 
     endGroup = nuke.Tab_Knob("endpipeline", None, nuke.TABENDGROUP)
-
     group.addKnob(endGroup)
+
+    # Temp-files warning just above the Publish turnout, with a small gap above.
+    group.addKnob(nuke.Text_Knob("tempwarn_gap", "", ""))
+    if is_ovs is False:
+        group.addKnob(tempwarn)
+    else:
+        group.addKnob(ovswarn)
 
     # --- Quick Publish settings (formerly the separate embed_quick_publish
     # knobChanged callback, now built inline so the version label can sit last).
@@ -542,9 +543,10 @@ def embedOptions():
     except (KeyError, TypeError, ValueError):
         is_prerender = False
 
-    quick_publish_begin = nuke.Tab_Knob(
-        "quick_publish_tab", "Quick Publish - Settings", nuke.TABBEGINGROUP
-    )
+    # Flat Publish section (no collapsible group) -- a labelled divider heads it.
+    publish_divider = nuke.Text_Knob("publish_div", "Publish")
+    publish_divider.setFlag(nuke.STARTLINE)
+
     publish_on_farm_checkbox = nuke.Boolean_Knob(
         "publish_on_farm", "Publish on Farm"
     )
@@ -556,7 +558,58 @@ def embedOptions():
     )
     publish_on_farm_checkbox.setFlag(nuke.STARTLINE)
 
-    group.addKnob(quick_publish_begin)
+    group.addKnob(publish_divider)
+
+    # Non-editable publish-version int at the top: persists in the script and
+    # can be referenced by expressions; refreshed from the server on build /
+    # on demand. A manual refresh sits beside it (server isn't polled on load).
+    publish_version_knob = nuke.Int_Knob("publish_version", "Latest Version")
+    publish_version_knob.setEnabled(False)
+    publish_version_knob.setTooltip(
+        "Latest successful publish version for this product (read-only)."
+    )
+    publish_version_knob.setFlag(nuke.STARTLINE)
+    refresh_latest_button = nuke.PyScript_Knob(
+        "refresh_latest_publish",
+        "Refresh",
+        "refresh_latest_publish_display(nuke.thisNode())",
+    )
+    refresh_latest_button.clearFlag(nuke.STARTLINE)
+    refresh_latest_button.setTooltip("Re-query the server for the latest version")
+    group.addKnob(publish_version_knob)
+    group.addKnob(refresh_latest_button)
+    refresh_latest_publish_display(group)
+
+    # Publish range: start/end fields, a button to copy the render range, and a
+    # tickbox to keep them synced automatically.
+    match_to_render_button = nuke.PyScript_Knob(
+        "match_to_render",
+        "Match to Render Range",
+        "match_publish_to_render(nuke.thisNode())",
+    )
+    match_to_render_button.clearFlag(nuke.STARTLINE)
+    match_to_render_button.setTooltip(
+        "Set the publish range to the render (Frame List) range."
+    )
+    auto_match_checkbox = nuke.Boolean_Knob("auto_match", "Auto Match")
+    auto_match_checkbox.setValue(False)
+    auto_match_checkbox.clearFlag(nuke.STARTLINE)
+    auto_match_checkbox.setTooltip(
+        "Automatically match the publish range to the render range whenever "
+        "the Frame List changes."
+    )
+
+    group.addKnob(publishFirst)
+    group.addKnob(publishLast)
+    group.addKnob(match_to_render_button)
+    group.addKnob(auto_match_checkbox)
+
+    # Publish action buttons.
+    quick_publish_button.setFlag(nuke.STARTLINE)
+    group.addKnob(quick_publish_button)
+    group.addKnob(read_from_publish_button)
+    group.addKnob(navigate_to_publish_button)
+
     group.addKnob(publish_on_farm_checkbox)
 
     # Review options only make sense for non-prerender nodes.
@@ -581,10 +634,6 @@ def embedOptions():
 
         group.addKnob(generate_review_checkbox)
         group.addKnob(burnin_checkbox)
-
-    group.addKnob(
-        nuke.Tab_Knob("quick_publish_end", None, nuke.TABENDGROUP)
-    )
 
     # Visible, read-only addon-version stamp at the very bottom of the panel.
     # Text_Knob is a label (not editable); the value renders HTML, so we grey
@@ -698,6 +747,75 @@ def set_ranges_to_globals(node):
         knob = node.knob(knob_name)
         if knob is not None:
             knob.setValue(value)
+
+
+def _parse_framelist_bounds(framelist):
+    """Return (first, last) ints from a Deadline-style frame list, or None.
+
+    Handles comma-separated ranges and 'start-endxstep' step syntax, e.g.
+    '1001-1100', '1-10,20-30', '1-100x2'.
+    """
+    frames = []
+    for part in str(framelist).split(","):
+        part = part.strip().split("x")[0]  # drop any step
+        for token in part.split("-"):
+            token = token.strip()
+            if token.isdigit():
+                frames.append(int(token))
+    if not frames:
+        return None
+    return min(frames), max(frames)
+
+
+def match_publish_to_render(node):
+    """Set the publish range (publishFirst/publishLast) to the render range,
+    parsed from the node's 'Frame List'."""
+    framelist_knob = node.knob("framelist")
+    if framelist_knob is None:
+        return
+    bounds = _parse_framelist_bounds(framelist_knob.value())
+    if bounds is None:
+        return
+    first, last = bounds
+    if node.knob("publishFirst") is not None:
+        node["publishFirst"].setValue(first)
+    if node.knob("publishLast") is not None:
+        node["publishLast"].setValue(last)
+
+
+def auto_match_publish_range():
+    """knobChanged handler: when 'Frame List' changes and 'Auto Match' is on,
+    keep the publish range synced to the render range."""
+    node = nuke.thisNode()
+    knob = nuke.thisKnob()
+    if knob is None or knob.name() != "framelist":
+        return
+    auto = node.knob("auto_match")
+    if auto is not None and auto.value():
+        match_publish_to_render(node)
+
+
+def _confirm_publish_range(node):
+    """Warn (OK/Cancel) if the publish range differs from the render range.
+
+    Returns True to proceed, False to abort.
+    """
+    framelist_knob = node.knob("framelist")
+    pf = node.knob("publishFirst")
+    pl = node.knob("publishLast")
+    if framelist_knob is None or pf is None or pl is None:
+        return True
+    bounds = _parse_framelist_bounds(framelist_knob.value())
+    if bounds is None:
+        return True
+    r_first, r_last = bounds
+    p_first, p_last = int(pf.value()), int(pl.value())
+    if (p_first, p_last) == (r_first, r_last):
+        return True
+    return nuke.ask(
+        "Publish range ({}-{}) differs from the render range ({}-{}).\n\n"
+        "Publish anyway?".format(p_first, p_last, r_first, r_last)
+    )
 
 
 def render_or_submit(node, local=False):
@@ -838,8 +956,84 @@ def parse_publish_instance(qnode):
     return json.loads(qnode.knob(api.INSTANCE_DATA_KNOB).value()[7:])
 
 
+def _publish_product_context(node):
+    """Return (project_name, product_name, folder_path) for the node's product."""
+    try:
+        data = json.loads(
+            node.knob(INSTANCE_DATA_KNOB).value().replace("JSON:::", "", 1)
+        )
+    except (AttributeError, ValueError):
+        return None, None, None
+    project = os.environ.get("AYON_PROJECT_NAME")
+    folder_path = data.get("folderPath") or os.environ.get("AYON_FOLDER_PATH")
+    product = data.get("productName")
+    return project, product, folder_path
+
+
+def get_latest_publish_version(node):
+    """(version_int, version_name) of the latest published version for the
+    node's product, or (0, 'v000') if it has never been published."""
+    project, product, folder_path = _publish_product_context(node)
+    if not (project and product and folder_path):
+        return 0, "v000"
+    return lib.get_server_pub_version(project, product, folder_path)
+
+
+def refresh_latest_publish_display(node):
+    """Query the server and update the non-editable 'publish_version' int.
+
+    On error the existing (persisted) value is left untouched.
+    """
+    knob = node.knob("publish_version")
+    if knob is None:
+        return
+    try:
+        latest, _ = get_latest_publish_version(node)
+    except Exception as e:
+        log.warning(f"Could not query latest publish version: {e}")
+        return
+    knob.setValue(int(latest))
+
+
+def _confirm_publish_version(node):
+    """Warn (OK/Cancel) if the version about to be published already exists.
+
+    Only meaningful when workfile/publish versions are linked (Hornet setup):
+    the publish then targets the workfile version, so re-publishing an already-
+    published workfile version collides and fails cryptically at pyblish time.
+    When versions are not linked AYON auto-increments, so there is nothing to
+    warn about. Fails open (returns True) on any error.
+    """
+    try:
+        if not lib.is_version_file_linked():
+            return True
+        latest, _ = get_latest_publish_version(node)
+        workfile_version = int(lib.get_version_from_path(nuke.Root().name()))
+    except Exception as e:
+        log.warning(f"Publish version pre-check skipped: {e}")
+        return True
+
+    if workfile_version > latest:
+        return True
+
+    return nuke.ask(
+        "Version v{:03d} already exists for this product "
+        "(latest published is v{:03d}).\n\n"
+        "Publishing over an existing version will fail. Continue anyway?"
+        .format(workfile_version, latest)
+    )
+
+
 def quick_publish_wrapper(node):
     from hornet_publish_utils import quick_publish
+
+    if not _confirm_publish_range(node):
+        print("Publish cancelled: publish range differs from render range")
+        return
+
+    if not _confirm_publish_version(node):
+        print("Publish cancelled: target version already exists")
+        return
 
     review_knob = node.knobs().get("generate_review_media")
     review = review_knob.value() if review_knob else False
@@ -862,6 +1056,9 @@ def quick_publish_wrapper(node):
             integrate_farm=integrate_farm,
             burnin=burnin,
         )
+
+    # Reflect the new version in the read-only label (best effort).
+    refresh_latest_publish_display(node)
 
 
 def get_deadlin_pool():

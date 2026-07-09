@@ -358,32 +358,38 @@ def assemble_publish_path(ayon_write_node):
         return None
 
     if is_single_frame:
-        # For single frames, remove frame number from path
+        # For single frames, drop the frame token from the render-template name.
         result = pathlib.Path(str(result).replace(".%04d", ""))
-        if not result.exists():
-            # The integrator may have written the file with a different publish
-            # template than "render" (e.g. "default" prefixes the project
-            # code), so the render-template name won't exist on disk. Fall back
-            # to the single matching-extension file in the version folder -
-            # mirrors the sequence-branch fallback below.
-            candidates = sorted(
-                p for p in publish_path.glob("*.{}".format(extension))
-                if p.is_file()
-            )
-            if len(candidates) == 1:
-                result = candidates[0]
-            else:
-                msg = (
-                    "No published single frame matching '{}' in {}. "
-                    "Files found: {}".format(
-                        result.name,
-                        publish_path,
-                        [p.name for p in candidates] or "none",
-                    )
+        target = result.name
+
+        # The integrator publishes with a template that prepends the project
+        # code (e.g. "rndAlex3_"), so the on-disk file ends with -- but is not
+        # equal to -- our render-template name. Resolve against what's actually
+        # in the version folder: prefer a suffix match (the prepended real name),
+        # then the exact render-template file, then the sole file present.
+        candidates = sorted(
+            p for p in publish_path.glob("*.{}".format(extension))
+            if p.is_file()
+        )
+        suffix_matches = [p for p in candidates if p.name.endswith(target)]
+        if len(suffix_matches) == 1:
+            result = suffix_matches[0]
+        elif result.exists():
+            pass  # exact render-template name is on disk; keep it
+        elif len(candidates) == 1:
+            result = candidates[0]
+        else:
+            msg = (
+                "No published single frame matching '{}' in {}. "
+                "Files found: {}".format(
+                    target,
+                    publish_path,
+                    [p.name for p in candidates] or "none",
                 )
-                print(msg)
-                log.error(msg)
-                return None
+            )
+            print(msg)
+            log.error(msg)
+            return None
     else:
         # For sequences, add frame range
         fs = SequenceFactory.from_sequence_string_absolute(
@@ -525,18 +531,16 @@ def navigate_to_publish(write_node):
     if not path:
         return
 
+    # assemble_publish_path resolves a file inside the latest version folder;
+    # open that version folder itself -- not its parent, which holds every
+    # version subfolder.
     path = path if path.is_dir() else path.parent
-    
+
     if not path.exists():
         print("absolutely no publishes were discovered.")
         return
-    
-    path = path.parent
 
     print(f"Publish path: {path}")
-
-    if not path.exists():
-        return
 
     if platform.system() == "Windows":
         os.startfile(path)

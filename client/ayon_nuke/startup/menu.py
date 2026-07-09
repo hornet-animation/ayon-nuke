@@ -26,6 +26,8 @@ from quick_write import (
     _quick_write_node,
     render_or_submit,
     set_ranges_to_globals,
+    match_publish_to_render,
+    refresh_latest_publish_display,
     report_obsolete_nodes,
 )
 from hornet_deadline_utils import deadlineNetworkSubmit
@@ -330,6 +332,8 @@ nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
 
 
 nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
+# Auto-match the publish range to the render range when Frame List changes.
+nuke.addKnobChanged(quick_write.auto_match_publish_range, nodeClass="Group")
 # Views Write Node temporarily disabled -- migrating to another package.
 # nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
 
