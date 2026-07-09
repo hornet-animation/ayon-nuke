@@ -317,6 +317,13 @@ m.addCommand(
         "locate_obsolete_nodes()",
         tooltip="Highlight AYON write nodes whose stamped addon version is out of date",
 )
+m.addCommand(
+        "Read From Rendered",
+        "quick_write.read_from_rendered_selected()",
+        "alt+r",
+        shortcutContext=2,  # DAG/node-graph only
+        tooltip="Read From Rendered on the selected Quick Write node(s)",
+)
 
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")

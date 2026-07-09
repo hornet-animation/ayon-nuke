@@ -830,6 +830,24 @@ def _confirm_publish_range(node):
     )
 
 
+def read_from_rendered_selected():
+    """Run Read From Rendered on the selected Quick Write node(s).
+
+    Menu/hotkey entry point -- unlike the on-node button it can't rely on
+    nuke.thisNode(), so it acts on the current selection.
+    """
+    import read_node_utils
+    nodes = [
+        n for n in nuke.selectedNodes()
+        if n.Class() == "Group" and "publish_instance" in n.knobs()
+    ]
+    if not nodes:
+        nuke.message("Select a Quick Write node first.")
+        return
+    for node in nodes:
+        read_node_utils.write_to_read(node, allow_relative=False)
+
+
 def render_or_submit(node, local=False):
     """ wrapper for Deadline and Render Local buttons."""
     if not check_shot_context(node):
