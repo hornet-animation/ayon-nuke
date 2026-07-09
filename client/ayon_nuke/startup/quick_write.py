@@ -298,8 +298,10 @@ def embedOptions():
     if "publish_instance" not in group.knobs().keys():
         return
 
-    if ftype not in knobMatrix.keys():
-        return
+    # Don't early-return on formats missing from knobMatrix (mov, mxf, ...):
+    # that skipped the purge below, leaving the previous format's Link_Knobs
+    # pointing at knobs the new write lacks ("Missing knob"). Instead we always
+    # purge and rebuild, defaulting unknown formats to just the universal knobs.
     for knb in group.allKnobs():
         try:
             # never clear or touch the invisible string knob that contains the pipeline JSON data
@@ -342,7 +344,11 @@ def embedOptions():
             link.setName("file_type")
             link.setFlag(0x1000)
             group.addKnob(link)
-        for kname in knobMatrix[ftype]:
+        for kname in knobMatrix.get(ftype, universalKnobs):
+            # Only link knobs the inner write actually exposes for this format,
+            # so unsupported formats don't produce "Missing knob" entries.
+            if nde.knob(kname) is None:
+                continue
             link = nuke.Link_Knob(kname)
             link.makeLink(nde.name(), kname)
             link.setName(kname)
@@ -380,6 +386,12 @@ def embedOptions():
 
     endGroup = nuke.Tab_Knob("endoutput", None, nuke.TABENDGROUP)
     group.addKnob(endGroup)
+
+    # Divider between the format-dependent output options and the pipeline.
+    dynamic_div = nuke.Text_Knob("dynamic_div", "")
+    dynamic_div.setFlag(nuke.STARTLINE)
+    group.addKnob(dynamic_div)
+
     beginGroup = nuke.Tab_Knob(
         "beginpipeline", "Rendering and Pipeline", nuke.TABBEGINGROUP
     )
@@ -909,13 +921,37 @@ def update_ovs_write_version(node):
         )
 
 
-def report_obsolete_nodes():
-    """Scan the script and pop up the AYON write nodes that are out of date.
+OBSOLETE_BACKDROP_PREFIX = "obsolete_locate_"
 
-    A node is considered obsolete when its stamped addon version differs from
-    the current ADDON_VERSION, or when it carries no stamp at all (created
-    before stamping existed). Intended for checking extant nodes in a script
-    after an addon update has been deployed.
+
+def _backdrop_around_node(node, version):
+    """Draw a red warning backdrop tightly around a single obsolete node."""
+    pad = 40
+    header = 24  # room for the label above the node
+    bd = nuke.nodes.BackdropNode(
+        xpos=node.xpos() - pad,
+        ypos=node.ypos() - pad - header,
+        bdwidth=node.screenWidth() + pad * 2,
+        bdheight=node.screenHeight() + pad * 2 + header,
+        tile_color=int(0xE8822EFF),
+        note_font_size=28,
+        label="OBSOLETE WRITE NODE\n{}".format(version),
+    )
+    bd.knob("name").setValue(OBSOLETE_BACKDROP_PREFIX + node.name())
+    return bd
+
+
+def locate_obsolete_nodes(notify=True):
+    """Highlight the AYON write nodes that are out of date.
+
+    A node is obsolete when its stamped addon version differs from the current
+    ADDON_VERSION, or when it carries no stamp at all (created before stamping
+    existed). Each match gets an orange warning backdrop so it can be found in
+    the DAG. Intended for checking extant nodes after an addon update.
+
+    Args:
+        notify (bool): show the summary/all-clear dialog. Pass False for a
+            silent run (e.g. on script load) -- backdrops are still drawn.
     """
     obsolete = []
     for node in get_all_ayon_write_nodes():
@@ -923,21 +959,64 @@ def report_obsolete_nodes():
         stamped = knob.value().strip() if knob else ""
         if stamped == ADDON_VERSION:
             continue
-        obsolete.append((node.name(), stamped or "<unstamped>"))
+        obsolete.append((node, stamped or "<unstamped>"))
+
+    # Clear backdrops from a previous run so repeated calls don't stack up.
+    for bd in nuke.allNodes("BackdropNode"):
+        if bd.name().startswith(OBSOLETE_BACKDROP_PREFIX):
+            nuke.delete(bd)
 
     if not obsolete:
-        nuke.message(
-            f"All AYON write nodes are up to date (addon {ADDON_VERSION})."
-        )
-        return obsolete
+        if notify:
+            nuke.message(
+                f"All AYON write nodes are up to date (addon {ADDON_VERSION})."
+            )
+        return []
 
-    obsolete.sort()
-    lines = "\n".join(f"  {name}  —  {ver}" for name, ver in obsolete)
-    nuke.message(
-        f"Current addon version: {ADDON_VERSION}\n\n"
-        f"{len(obsolete)} obsolete write node(s) found:\n\n{lines}"
-    )
-    return obsolete
+    for node, ver in obsolete:
+        _backdrop_around_node(node, ver)
+
+    if notify:
+        lines = "\n".join(
+            f"  {node.name()}  —  {ver}"
+            for node, ver in sorted(obsolete, key=lambda t: t[0].name())
+        )
+        nuke.message(
+            f"Current addon version: {ADDON_VERSION}\n\n"
+            f"{len(obsolete)} obsolete write node(s) found and highlighted:"
+            f"\n\n{lines}"
+        )
+    return [(node.name(), ver) for node, ver in obsolete]
+
+
+def locate_obsolete_on_load():
+    """onScriptLoad handler: silently highlight obsolete nodes (GUI only).
+
+    Draws warning backdrops when out-of-date nodes exist and does nothing
+    otherwise. Skipped in terminal/farm sessions, wrapped so a failure can
+    never block loading a script, and restores the script's modified state so
+    merely opening it to look isn't flagged as an unsaved change.
+    """
+    if not nuke.GUI:
+        return
+    try:
+        was_modified = nuke.Root().modified()
+        found = locate_obsolete_nodes(notify=False)
+        if not was_modified:
+            nuke.Root().setModified(False)
+        if found:
+            lines = "\n".join(
+                f"  {name}  —  {ver}" for name, ver in sorted(found)
+            )
+            nuke.message(
+                "WARNING: {} obsolete AYON write node(s) found in this script "
+                "(current addon {}).\nThey are highlighted with orange "
+                "backdrops in the node graph.\n\n{}".format(
+                    len(found), ADDON_VERSION, lines
+                )
+            )
+    except Exception as e:
+        log.warning(f"locate_obsolete_on_load failed: {e}")
 
 
 def get_all_ayon_write_nodes():

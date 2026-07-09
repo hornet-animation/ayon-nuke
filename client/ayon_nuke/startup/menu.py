@@ -28,7 +28,7 @@ from quick_write import (
     set_ranges_to_globals,
     match_publish_to_render,
     refresh_latest_publish_display,
-    report_obsolete_nodes,
+    locate_obsolete_nodes,
 )
 from hornet_deadline_utils import deadlineNetworkSubmit
 from hornet_publish_utils import quick_publish
@@ -313,9 +313,9 @@ m.addCommand("&Oversized Write Node", "ovs_write_node()")
 #         tooltip="Create a views write node that generates write nodes for all views",
 # )
 m.addCommand(
-        "Report Obsolete Write Nodes",
-        "report_obsolete_nodes()",
-        tooltip="List AYON write nodes whose stamped addon version is out of date",
+        "Locate Obsolete Write Nodes",
+        "locate_obsolete_nodes()",
+        tooltip="Highlight AYON write nodes whose stamped addon version is out of date",
 )
 
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
@@ -327,6 +327,8 @@ nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
 #nuke.addOnScriptSave(set_hwrite_version)
 nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
+# Silently highlight out-of-date write nodes when a script is opened (GUI only).
+nuke.addOnScriptLoad(quick_write.locate_obsolete_on_load)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
 nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
 
