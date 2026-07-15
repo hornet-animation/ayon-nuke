@@ -25,6 +25,7 @@ from quick_write import (
     update_ovs_write_version,
     _quick_write_node,
     render_or_submit,
+    on_priority_clamp,
     set_ranges_to_globals,
     match_publish_to_render,
     refresh_latest_publish_display,
@@ -46,7 +47,7 @@ import ayon_api
 import hornet_deadline_utils
 import file_sequence
 import views_write
-from reload_hornet import reload_hornet_modules
+from reload_hornet import reload_hornet_modules, register_quick_write_callbacks
 
 from ayon_core.pipeline import registered_host
 # Version Up Workfile import
@@ -294,14 +295,14 @@ def enable_publish_range():
 
 hornet_menu = nuke.menu("Nuke")
 m = hornet_menu.addMenu("&Hornet Write")
-m.addCommand("&Quick Write Node", "quick_write_node()", "Ctrl+W")
+m.addCommand("&Hornet Write Node", "quick_write_node()", "Ctrl+W")
 m.addCommand(
-    "&Quick PreWrite Node",
+    "&Hornet PreWrite Node",
     "quick_write_node(family='prerender')",
     "Ctrl+Shift+W",
 )
 m.addCommand(
-    "&Quick Single Frame Write Node",
+    "&Hornet Single Frame Write Node",
     "quick_write_node(family='image')"
 )
 m.addCommand("&Oversized Write Node", "ovs_write_node()")
@@ -318,36 +319,38 @@ m.addCommand(
         tooltip="Highlight AYON write nodes whose stamped addon version is out of date",
 )
 m.addCommand(
+        "Adopt Current Shot",
+        "quick_write.adopt_current_shot_selected()",
+        tooltip="Adopt the selected Hornet Write node(s) -- or all foreign "
+                "ones, if none are selected -- to the current shot/task",
+)
+m.addCommand(
         "Read From Rendered",
         "quick_write.read_from_rendered_selected()",
         "alt+r",
         shortcutContext=2,  # DAG/node-graph only
-        tooltip="Read From Rendered on the selected Quick Write node(s)",
+        tooltip="Read From Rendered on the selected Hornet Write node(s)",
 )
 
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")
-nuke.addKnobChanged(embedOptions, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
 nuke.addKnobChanged(warnSingleFrame, nodeClass="Write")
 nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
 #nuke.addOnScriptSave(set_hwrite_version)
 nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
-# Silently highlight out-of-date write nodes when a script is opened (GUI only).
-nuke.addOnScriptLoad(quick_write.locate_obsolete_on_load)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
 nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
 
-
-nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
-# Auto-match the publish range to the render range when Frame List changes.
-nuke.addKnobChanged(quick_write.auto_match_publish_range, nodeClass="Group")
 # Views Write Node temporarily disabled -- migrating to another package.
 # nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
 
-# Restore the 'File output' multiline knob height, which Nuke drops on reload.
-nuke.addOnCreate(quick_write.restore_file_output_height, nodeClass="Group")
+# Quick Write callbacks (embedOptions, priority clamp, auto-match, multiline-
+# height restore, obsolete-on-load, deadline pool refresh) are registered
+# through reload_hornet so reload_hornet_modules() can rebind them to reloaded
+# code without stacking duplicates.
+register_quick_write_callbacks()
 
 nuke.menu("Nuke").addCommand(
     "File/Version Up Workfile",

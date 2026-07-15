@@ -152,6 +152,7 @@ def getNodeSubmissionInfo(node):
         )
 
     relevant_knobs = [
+        "file",          # group file-output knob ("File output" on old nodes)
         "File output",
         "deadlinePool",
         "deadlineGroup",
@@ -170,6 +171,11 @@ def getNodeSubmissionInfo(node):
         if knb.name() in relevant_knobs
     }
 
+    # Normalize the file-output knob to its legacy key so downstream
+    # consumers (submission body) work for both old and new nodes.
+    if "file" in knob_values:
+        knob_values["File output"] = knob_values.pop("file")
+
     try:
         first_knob = inside_write.knob("first")
         last_knob = inside_write.knob("last")
@@ -183,10 +189,15 @@ def getNodeSubmissionInfo(node):
     return knob_values
 
 
-def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None):
+def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None, overrides=None):
     # TODO I added miliseconds to the timestamp which forms the file name to allow for batch submissions, otherwise it fails beacuse it tries to
     # overwrite the same file each time.
     # Would be better to save once per batch which requires refactor
+    #
+    # `overrides`, if given, is a dict whose keys match the entries that
+    # getNodeSubmissionInfo() reads from the node's knobs (e.g.
+    # "deadlinePriority", "deadlinePool"). Values here override what the node's
+    # knobs say for this submission only -- nothing is written back to the node.
 
     print("deadlineNetworkSubmit dev mode v4")
 
@@ -203,7 +214,10 @@ def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None):
         time=timestamp,
     )
 
-    body = build_request(getNodeSubmissionInfo(node), temp_script_path, node)
+    knob_values = getNodeSubmissionInfo(node)
+    if overrides:
+        knob_values.update(overrides)
+    body = build_request(knob_values, temp_script_path, node)
 
     if batch is not None:
         body["JobInfo"]["BatchName"] = batch

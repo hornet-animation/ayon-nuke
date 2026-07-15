@@ -13,6 +13,9 @@ from ayon_nuke.api.lib import (
     get_version_from_path,
     INSTANCE_DATA_KNOB,
 )
+# Safe (non-circular): quick_write only imports this module lazily inside
+# functions. Resolves the group's file-output knob old or new name.
+from quick_write import get_file_output_knob
 
 log = Logger.get_logger(__name__)
 
@@ -259,7 +262,7 @@ def assemble_publish_path(ayon_write_node):
     server_version = get_server_pub_version(project_name, name, context["folder_path"])
     if is_version_file_linked() and is_ovs:
         file_version_num = get_version_from_path(
-            ayon_write_node["File output"].value()
+            get_file_output_knob(ayon_write_node).value()
         )
         if int(file_version_num) < server_version[0]:
             log.warning(
@@ -507,7 +510,9 @@ def navigate_to_render(write_node):
 
     """
 
-    file_path = pathlib.Path(write_node["File output"].evaluate()).parent
+    file_path = pathlib.Path(
+        get_file_output_knob(write_node).evaluate()
+    ).parent
     if not file_path.exists():
         return
 
