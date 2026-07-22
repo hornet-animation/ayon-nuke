@@ -1,6 +1,6 @@
 name = "nuke"
 title = "Nuke"
-version = "0.4.10-hornet.57"
+version = "0.4.10-hornet.61"
 
 app_host_name = "nuke"
 client_dir = "ayon_nuke"
