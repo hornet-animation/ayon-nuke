@@ -100,69 +100,19 @@ def apply_format_presets():
 
 # Hornet- helper to switch file extension to filetype
 def writes_ver_sync():
-    """Callback synchronizing version of publishable write nodes"""
+    """onScriptSave: re-point OVS Hornet write nodes at the current version.
+
+    The old Avalon-era implementation only touched nodes carrying an
+    'AvalonTab', which AYON/Hornet nodes never have -- so it was a silent
+    no-op and OVS render paths never followed a workfile version-up. The real
+    work now lives in quick_write.sync_ovs_write_versions() (keyed on the
+    publish_instance data); this wrapper keeps the existing onScriptSave
+    registration pointed at it.
+    """
     try:
-        print("Hornet- syncing version to write nodes")
-        # rootVersion = pype.get_version_from_path(nuke.root().name())
-        pattern = re.compile(r"[\._]v([0-9]+)", re.IGNORECASE)
-        rootVersion = pattern.findall(nuke.root().name())[0]
-        padding = len(rootVersion)
-        new_version = "v" + str("{" + ":0>{}".format(padding) + "}").format(
-            int(rootVersion)
-        )
-        print("new_version: {}".format(new_version))
+        quick_write.sync_ovs_write_versions()
     except Exception as e:
-        print(e)
-        return
-    groupnodes = [
-        node.nodes() for node in nuke.allNodes() if node.Class() == "Group"
-    ]
-    allnodes = [
-        node for group in groupnodes for node in group
-    ] + nuke.allNodes()
-    for each in allnodes:
-        if each.Class() == "Write":
-            # check if the node is avalon tracked
-            if each.name().startswith("inside_"):
-                avalonNode = nuke.toNode(each.name().replace("inside_", ""))
-                if avalonNode is None:
-                    print(f"Avalon node not found for {each.name()}")
-                    continue
-            else:
-                avalonNode = each
-            if "AvalonTab" not in avalonNode.knobs():
-                print("tab failure")
-                continue
-
-            avalon_knob_data = avalon.nuke.get_avalon_knob_data(
-                avalonNode, ["avalon:", "ak:"]
-            )
-            try:
-                if avalon_knob_data["families"] not in ["render", "write"]:
-                    print("families fail")
-                    log.debug(avalon_knob_data["families"])
-                    continue
-
-                node_file = each["file"].value()
-
-                # node_version = "v" + pype.get_version_from_path(node_file)
-                node_version = "v" + pattern.findall(node_file)[0]
-
-                log.debug("node_version: {}".format(node_version))
-
-                node_new_file = node_file.replace(node_version, new_version)
-                each["file"].setValue(node_new_file)
-                # H: don't need empty folders if work file isn't rendered later
-                # if not os.path.isdir(os.path.dirname(node_new_file)):
-                #    log.warning("Path does not exist! I am creating it.")
-                #    os.makedirs(os.path.dirname(node_new_file), 0o766)
-            except Exception as e:
-                print(e)
-                log.warning(
-                    "Write node: `{}` has no version in path: {}".format(
-                        each.name(), e
-                    )
-                )
+        print(f"writes_ver_sync failed: {e}")
 
 def warnSingleFrame():
     singleFrameWarn = nuke.Text_Knob(

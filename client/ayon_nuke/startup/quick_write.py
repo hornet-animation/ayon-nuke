@@ -729,6 +729,60 @@ def update_ovs_write_version(node):
         )
 
 
+def sync_ovs_write_versions():
+    """onScriptSave hook: point OVS write nodes at the current publish version.
+
+    OVS nodes render straight into the versioned publish tree, so when the
+    workfile version increments their output path must follow -- otherwise the
+    node keeps writing to the old version folder. Non-OVS writes render to an
+    unversioned temp path, so they are left alone.
+
+    Only runs when workfile and publish versions are linked (the Hornet
+    setup): in that mode get_ovs_pathing() resolves to the workfile-matched
+    version, so re-deriving on every save is idempotent. When versions are NOT
+    linked, get_ovs_pathing() increments each call, which would bump the
+    version on every save -- so we skip and leave versioning to render/publish
+    time.
+    """
+    # Collect OVS nodes first -- this is cheap and local (just parses the
+    # publish_instance JSON). is_version_file_linked() below makes a server
+    # round-trip, and this runs on EVERY save, so bail before that when the
+    # script has no OVS nodes (the common case).
+    ovs_nodes = []
+    for node in get_all_ayon_write_nodes():
+        try:
+            data = parse_publish_instance(node)
+        except Exception:
+            continue
+        if data.get("is_ovs"):
+            ovs_nodes.append((node, data))
+    if not ovs_nodes:
+        return
+
+    try:
+        if not lib.is_version_file_linked():
+            return
+    except Exception as e:
+        log.warning(f"OVS version sync skipped (link check failed): {e}")
+        return
+
+    for node, data in ovs_nodes:
+        try:
+            fpath_new = get_ovs_pathing(data)
+        except Exception as e:
+            log.warning(
+                f"Could not resolve OVS path for '{node.name()}': {e}"
+            )
+            continue
+        interior = nuke.toNode("inside_" + node.name())
+        if interior is not None and "file" in interior.knobs():
+            interior["file"].setValue(fpath_new)
+        out_knob = node.knob("File output")
+        if out_knob is not None:
+            out_knob.setValue(fpath_new)
+        log.info(f"OVS version synced for '{node.name()}': {fpath_new}")
+
+
 def get_all_ayon_write_nodes():
     ayon_write_nodes = []
 
