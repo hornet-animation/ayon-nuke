@@ -48,7 +48,7 @@ universalKnobs = ["colorspace", "views", "raw"]
 knobMatrix = {key: universalKnobs + value for key, value in knobMatrix.items()}
 presets = {
     "exr": [
-        ("channels", "rgba"),
+        ("channels", "all"),
         ("datatype", "16 bit half"),
     ],
     "png": [
