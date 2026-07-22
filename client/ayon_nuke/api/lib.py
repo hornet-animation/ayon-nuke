@@ -3116,6 +3116,13 @@ def get_ovs_pathing(data):
     directory_template = anatomy.templates["publish"]["render"]["directory"]
     root = anatomy.roots["work"].value.rstrip("/")
     project_name = context["project_name"]
+    # Some projects' publish templates prepend the project code
+    # ("{project[code]}_..."), so the template data must carry it or the
+    # format call fails with "Missing keys: project".
+    try:
+        project_code = ayon_api.get_project(project_name)["code"]
+    except Exception:
+        project_code = project_name
     hierarchy = pathlib.PurePosixPath(context["folder_path"].lstrip("/")).parent
     shot = pathlib.Path(context["folder_path"]).name
     product = data["productType"]
@@ -3126,7 +3133,7 @@ def get_ovs_pathing(data):
         directory_template.format_map(
             {
                 "root": {"work": root},
-                "project": {"name": project_name},
+                "project": {"name": project_name, "code": project_code},
                 "hierarchy": hierarchy,
                 "folder": {"name": shot},
                 "product": {"type": product, "name": name},
@@ -3147,6 +3154,7 @@ def get_ovs_pathing(data):
     # Create filename
     file_template = anatomy.templates["publish"]["render"]["file"]
     file_data ={
+            "project":{"name": project_name, "code": project_code},
             "folder":{"name": shot},
             "product":{"name": name },
             "version":render_version,

@@ -232,6 +232,14 @@ def assemble_publish_path(ayon_write_node):
 
     root = anatomy.roots["work"].value.rstrip("/")
     project_name = context["project_name"]
+    # Publish file templates on some projects prepend the project code
+    # (e.g. "{project[code]}_..."), so the template data must carry it or
+    # format_strict fails with "Missing keys: project".
+    import ayon_api
+    try:
+        project_code = ayon_api.get_project(project_name)["code"]
+    except Exception:
+        project_code = project_name
     hierarchy = pathlib.Path(context["folder_path"].lstrip("/")).parent
     shot = pathlib.Path(context["folder_path"]).name
     product = instance_data["productType"]
@@ -282,7 +290,7 @@ def assemble_publish_path(ayon_write_node):
         directory_template.format_map(
             {
                 "root": {"work": root},
-                "project": {"name": project_name},
+                "project": {"name": project_name, "code": project_code},
                 "hierarchy": hierarchy,
                 "folder": {"name": shot},
                 "product": {"type": product, "name": name},
@@ -311,6 +319,7 @@ def assemble_publish_path(ayon_write_node):
     # pad_count = len(str(last_frame))
 
     file_data = {
+        "project": {"name": project_name, "code": project_code},
         "folder": {"name": shot},
         "product": {"name": name},
         "frame": "%04d",
