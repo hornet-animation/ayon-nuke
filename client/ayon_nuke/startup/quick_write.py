@@ -23,6 +23,17 @@ except ImportError:
 
 log = Logger.get_logger(__name__)
 
+# Bumped whenever OVS/publish behavior changes, so a live (dev-mode) session
+# can be verified against the source. Printed at module load and echoed by
+# the OVS flows.
+QUICK_WRITE_REV = "ovs-publish-revC"
+
+nuke.tprint(
+    "[hornet quick_write {}] loaded from: {}".format(
+        QUICK_WRITE_REV, os.path.abspath(__file__)
+    )
+)
+
 # dict mapping extension to list of exposed parameters from write node to top level group node
 knobMatrix = {
     "exr": ["autocrop", "datatype", "heroview", "metadata", "interleave"],
@@ -37,7 +48,7 @@ universalKnobs = ["colorspace", "views", "raw"]
 knobMatrix = {key: universalKnobs + value for key, value in knobMatrix.items()}
 presets = {
     "exr": [
-        ("channels", "all"),
+        ("channels", "rgba"),
         ("datatype", "16 bit half"),
     ],
     "png": [
@@ -577,9 +588,7 @@ def check_existing_files_pattern(node):
         if "File output" in node.knobs():
             file_path = node["File output"].value()
         else:
-            node_name = node["name"].value()
-            interior_write = "inside_" + node_name
-            wnode = nuke.toNode(interior_write)
+            wnode = _find_interior_write(node)
             if wnode is not None and "file" in wnode.knobs():
                 file_path = wnode["file"].value()
             else:
@@ -699,10 +708,11 @@ def update_ovs_write_version(node):
                 )
                 if prompt:
                     try:
-                        fpath_new = get_ovs_pathing(data)
+                        fpath_new = get_ovs_pathing(
+                            _ovs_data_with_current_ext(node, data)
+                        )
                         node_name = node["name"].value()
-                        interior_write = "inside_" + node_name
-                        wnode = nuke.toNode(interior_write)
+                        wnode = _find_interior_write(node)
                         if wnode is not None:
                             wnode["file"].setValue(fpath_new)
                             node["File output"].setValue(fpath_new)
@@ -712,7 +722,7 @@ def update_ovs_write_version(node):
                             nuke.toNode(node_name)
                         else:
                             log.warning(
-                                f"Interior write node {interior_write} not found, cannot set file path."
+                                f"No interior write node found in {node_name}, cannot set file path."
                             )
                     except Exception as e:
                         log.error(f"Error setting ovs write version: {e}")
@@ -727,6 +737,52 @@ def update_ovs_write_version(node):
         log.debug(
             f"{node.name()} is missing instance data knob, cannot set version"
         )
+
+
+def _find_interior_write(group_node):
+    """Find the Write node inside a Hornet write group by traversal.
+
+    Never look the interior up by name ("inside_<group>"): bare-name
+    nuke.toNode() resolves against the CURRENT group context, so it fails
+    from root-level callbacks (onScriptSave) and after pastes that renamed
+    the interior. Walking the group's children is context-free and robust.
+    """
+    try:
+        for child in group_node.nodes():
+            if child.Class() == "Write":
+                return child
+    except Exception as e:
+        log.warning(f"Could not traverse group '{group_node.name()}': {e}")
+    return None
+
+
+def _ovs_data_with_current_ext(node, data):
+    """Return a copy of the instance data with `ext` corrected to what the
+    node actually renders.
+
+    The JSON stores the extension from node-creation time (imageio default,
+    usually exr), but _quick_write_node flips file_type afterwards (dpx for
+    renders) without updating the JSON -- so get_ovs_pathing(data) would
+    rebuild paths with the wrong extension and lose track of real renders.
+    """
+    ext = None
+    interior = _find_interior_write(node)
+    if interior is not None:
+        try:
+            ext = (interior["file_type"].value() or "").strip() or None
+        except Exception:
+            ext = None
+        if not ext:
+            try:
+                ext = os.path.splitext(
+                    interior["file"].value()
+                )[1].lstrip(".") or None
+            except Exception:
+                ext = None
+    if ext and ext != data.get("ext"):
+        data = dict(data)
+        data["ext"] = ext
+    return data
 
 
 def sync_ovs_write_versions():
@@ -744,6 +800,16 @@ def sync_ovs_write_versions():
     version on every save -- so we skip and leave versioning to render/publish
     time.
     """
+    # Stand down while a publish is running: quick_publish saves the script
+    # mid-run, and re-syncing then would yank a deliberately re-pointed OVS
+    # node back to the (empty) workfile-version path.
+    if _OVS_SYNC_SUSPENDED["active"]:
+        nuke.tprint(
+            "[hornet quick_write {}] OVS save-sync suspended "
+            "(publish in progress)".format(QUICK_WRITE_REV)
+        )
+        return
+
     # Collect OVS nodes first -- this is cheap and local (just parses the
     # publish_instance JSON). is_version_file_linked() below makes a server
     # round-trip, and this runs on EVERY save, so bail before that when the
@@ -768,19 +834,27 @@ def sync_ovs_write_versions():
 
     for node, data in ovs_nodes:
         try:
-            fpath_new = get_ovs_pathing(data)
+            fpath_new = get_ovs_pathing(_ovs_data_with_current_ext(node, data))
         except Exception as e:
             log.warning(
                 f"Could not resolve OVS path for '{node.name()}': {e}"
             )
             continue
-        interior = nuke.toNode("inside_" + node.name())
+        interior = _find_interior_write(node)
         if interior is not None and "file" in interior.knobs():
             interior["file"].setValue(fpath_new)
+        else:
+            log.warning(
+                f"No interior write found in '{node.name()}'; only the "
+                f"group's File output was updated"
+            )
         out_knob = node.knob("File output")
         if out_knob is not None:
             out_knob.setValue(fpath_new)
-        log.info(f"OVS version synced for '{node.name()}': {fpath_new}")
+        nuke.tprint(
+            "[hornet quick_write {}] OVS save-sync re-pointed '{}' -> "
+            "{}".format(QUICK_WRITE_REV, node.name(), fpath_new)
+        )
 
 
 def get_all_ayon_write_nodes():
@@ -799,8 +873,237 @@ def parse_publish_instance(qnode):
     return json.loads(qnode.knob(api.INSTANCE_DATA_KNOB).value()[7:])
 
 
+# While a publish runs, the onScriptSave OVS version-sync must stand down:
+# quick_publish() saves the script mid-run, and the sync would re-point a
+# deliberately re-pointed OVS node back at the (empty) workfile version.
+_OVS_SYNC_SUSPENDED = {"active": False}
+
+
+def _frames_matching_pattern(path_pattern):
+    """Return files on disk matching a frame-numbered output pattern
+    (%04d / #### tokens are globbed)."""
+    import glob as _glob
+    import re as _re
+    pat = _re.sub(r"%0?\d*d", "*", path_pattern)
+    pat = _re.sub(r"#+", "*", pat)
+    return _glob.glob(pat)
+
+
+def _ovs_version_is_published(data, version_num):
+    """True when the node's product already has `version_num` on the AYON
+    server. Raises on server/lookup errors -- the caller decides the
+    fallback policy."""
+    import ayon_api
+    project = os.environ.get("AYON_PROJECT_NAME")
+    folder_path = data.get("folderPath")
+    product_name = data.get("productName")
+    if not (project and folder_path and product_name):
+        return False
+    folder = ayon_api.get_folder_by_path(project, folder_path)
+    if not folder:
+        return False
+    product = ayon_api.get_product_by_name(
+        project, product_name, folder["id"]
+    )
+    if not product:
+        return False
+    return ayon_api.get_version_by_name(
+        project, version_num, product["id"]
+    ) is not None
+
+
+def _find_publishable_ovs_version(path, data):
+    """Search the OVS product directory backwards (newest version first) for
+    a render that is both on disk and not yet published.
+
+    `path` is the node's current output path
+    (.../product/vNNN/name_vNNN.%04d.ext); candidate paths are derived by
+    swapping the version folder/filename tokens. A candidate must have files
+    matching the frame pattern, parse as a coherent sequence (file_sequence
+    check, run only on globbed candidates and soft-failing to the glob
+    result), and not already exist as a version on the AYON server.
+
+    Returns (version, path_at_version, skipped) where `skipped` is a list of
+    (version, reason) pairs for reporting; (None, None, skipped) when
+    nothing publishable exists.
+    """
+    import re as _re
+    version_dir = os.path.dirname(path)
+    product_dir = os.path.dirname(version_dir)
+    vname_old = os.path.basename(version_dir)
+    base_old = os.path.basename(path)
+    skipped = []
+    if not os.path.isdir(product_dir):
+        return None, None, skipped
+
+    candidates = []
+    for entry in os.listdir(product_dir):
+        m = _re.match(r"^v(\d+)$", entry)
+        if m and os.path.isdir(os.path.join(product_dir, entry)):
+            candidates.append((int(m.group(1)), entry))
+
+    stem_old, ext_old = os.path.splitext(base_old)
+
+    for num, vname in sorted(candidates, reverse=True):
+        stem_cand = stem_old.replace(vname_old, vname)
+        cand_path = os.path.join(
+            product_dir, vname, stem_cand + ext_old
+        ).replace("\\", "/")
+        frames = _frames_matching_pattern(cand_path)
+        if not frames:
+            # Extension drift fallback: the node's path extension can be
+            # stale (the instance JSON keeps the creation-time ext, usually
+            # exr, while the node actually renders e.g. dpx). Accept frames
+            # with any extension and adopt the one found on disk.
+            loose = _frames_matching_pattern(
+                os.path.join(product_dir, vname, stem_cand + ".*")
+                .replace("\\", "/")
+            )
+            if loose:
+                ext_found = os.path.splitext(loose[0])[1]
+                frames = [
+                    f for f in loose
+                    if os.path.splitext(f)[1].lower() == ext_found.lower()
+                ]
+                cand_path = os.path.join(
+                    product_dir, vname, stem_cand + ext_found
+                ).replace("\\", "/")
+                log.warning(
+                    f"OVS search: {vname} frames found with extension "
+                    f"'{ext_found}' (node path says '{ext_old}'); using "
+                    f"what's on disk"
+                )
+        if not frames:
+            skipped.append((num, "no frames on disk"))
+            continue
+        if len(frames) > 1:
+            try:
+                from file_sequence import SequenceFactory
+                if not SequenceFactory.from_filenames(
+                    [os.path.basename(f) for f in frames]
+                ):
+                    skipped.append((num, "files do not parse as a sequence"))
+                    continue
+            except Exception:
+                pass  # validation is best-effort; trust the glob
+        try:
+            if _ovs_version_is_published(data, num):
+                skipped.append((num, "already published"))
+                continue
+        except Exception as e:
+            log.warning(
+                f"Could not check the server for v{num:03d} ({e}); "
+                f"treating it as unpublished"
+            )
+        return num, cand_path, skipped
+    return None, None, skipped
+
+
+def _confirm_ovs_publish_version(node):
+    """OVS publish pre-flight: ensure we publish a version that has frames.
+
+    OVS nodes render straight into the versioned publish tree, and the
+    publish pipeline targets the CURRENT workfile version. After a
+    render -> version-up -> publish sequence, both the node path and the
+    pipeline point at a version folder with no frames and the publish
+    fails. This resolves the newest version folder that actually holds a
+    valid render, re-points the node at it, and asks before publishing
+    when that version differs from the script version.
+
+    Returns True to proceed, False to abort.
+    """
+    try:
+        data = parse_publish_instance(node)
+    except Exception:
+        return True
+    if not data.get("is_ovs"):
+        return True
+
+    nuke.tprint(
+        "[hornet quick_write {}] OVS publish pre-flight running on "
+        "'{}'".format(QUICK_WRITE_REV, node.name())
+    )
+
+    out_knob = node.knob("File output")
+    if out_knob is None:
+        return True
+    path = (out_knob.value() or "").replace("\\", "/")
+    if not path:
+        return True
+
+    try:
+        script_version = int(lib.get_version_from_path(nuke.Root().name()))
+    except Exception:
+        script_version = None
+
+    chosen, chosen_path, skipped = _find_publishable_ovs_version(path, data)
+    nuke.tprint(
+        "[hornet quick_write {}] OVS search: chose {} | skipped: {}".format(
+            QUICK_WRITE_REV,
+            "v{:03d}".format(chosen) if chosen is not None else "nothing",
+            ", ".join(
+                "v{:03d} ({})".format(n, w) for n, w in skipped
+            ) or "none",
+        )
+    )
+
+    if chosen is None:
+        lines = "\n".join(
+            "  v{:03d}: {}".format(num, why) for num, why in skipped
+        ) or "  (no version folders found)"
+        nuke.message(
+            "Nothing publishable for this OVS node.\n\n"
+            "Searched {}:\n{}\n\n"
+            "Render a new version before publishing.".format(
+                os.path.dirname(os.path.dirname(path)), lines
+            )
+        )
+        return False
+
+    try:
+        path_version = int(lib.get_version_from_path(path))
+    except Exception:
+        path_version = None
+
+    # Node target, newest unpublished render and script version all agree:
+    # publish silently, exactly like a normal same-version flow.
+    if chosen == path_version and (
+        script_version is None or chosen == script_version
+    ):
+        return True
+
+    prompt = "About to publish OVS render v{:03d}".format(chosen)
+    if script_version is not None:
+        prompt += " -- the script is at v{:03d}".format(script_version)
+    prompt += ".\n"
+    if skipped:
+        prompt += "\nSkipped: " + ", ".join(
+            "v{:03d} ({})".format(num, why) for num, why in skipped
+        ) + "\n"
+    prompt += "\nProceed?"
+    if not nuke.ask(prompt):
+        return False
+
+    # Re-point the node so collection reads -- and integration publishes --
+    # the version that actually holds the chosen render.
+    if chosen != path_version:
+        interior = _find_interior_write(node)
+        if interior is not None and "file" in interior.knobs():
+            interior["file"].setValue(chosen_path)
+        out_knob.setValue(chosen_path)
+        log.info(f"OVS publish re-pointed '{node.name()}' to {chosen_path}")
+    return True
+
+
 def quick_publish_wrapper(node):
     from hornet_publish_utils import quick_publish
+
+    # OVS: make sure the publish targets a version that actually has frames
+    # (otherwise the pipeline publishes the current script version, which
+    # fails after render -> version-up -> publish).
+    if not _confirm_ovs_publish_version(node):
+        print("Publish cancelled: OVS version check")
+        return
 
     review_knob = node.knobs().get("generate_review_media")
     review = review_knob.value() if review_knob else False
@@ -815,14 +1118,18 @@ def quick_publish_wrapper(node):
     burnin_knob = node.knobs().get("burnin")
     burnin = burnin_knob.value() if burnin_knob else False
 
-    with nuke.root():
-        quick_publish(
-            node,
-            review=review,
-            review_farm=review_farm,
-            integrate_farm=integrate_farm,
-            burnin=burnin,
-        )
+    _OVS_SYNC_SUSPENDED["active"] = True
+    try:
+        with nuke.root():
+            quick_publish(
+                node,
+                review=review,
+                review_farm=review_farm,
+                integrate_farm=integrate_farm,
+                burnin=burnin,
+            )
+    finally:
+        _OVS_SYNC_SUSPENDED["active"] = False
 
 
 def get_deadlin_pool():
