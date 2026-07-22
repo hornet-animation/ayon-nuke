@@ -3114,7 +3114,10 @@ def get_ovs_pathing(data):
     context = host.get_current_context()
     anatomy = Anatomy()
     directory_template = anatomy.templates["publish"]["render"]["directory"]
-    root = anatomy.roots["work"].value.rstrip("/")
+    # Normalize to forward slashes: some projects configure the root with
+    # backslashes, which PurePosixPath treats as literal characters and
+    # Nuke's knob evaluation later mangles as escape sequences.
+    root = anatomy.roots["work"].value.replace("\\", "/").rstrip("/")
     project_name = context["project_name"]
     # Some projects' publish templates prepend the project code
     # ("{project[code]}_..."), so the template data must carry it or the

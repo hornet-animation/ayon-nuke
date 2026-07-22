@@ -230,7 +230,10 @@ def assemble_publish_path(ayon_write_node):
     directory_template = anatomy.templates["publish"]["render"]["directory"]
     file_template = anatomy.templates["publish"]["render"]["file"]
 
-    root = anatomy.roots["work"].value.rstrip("/")
+    # Normalize to forward slashes: some projects configure the root with
+    # backslashes, which PurePosixPath treats as literal characters and
+    # Nuke's knob evaluation later mangles as escape sequences.
+    root = anatomy.roots["work"].value.replace("\\", "/").rstrip("/")
     project_name = context["project_name"]
     # Publish file templates on some projects prepend the project code
     # (e.g. "{project[code]}_..."), so the template data must carry it or
