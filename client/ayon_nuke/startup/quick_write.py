@@ -14,6 +14,7 @@ from ayon_nuke.api.lib import (
     INSTANCE_DATA_KNOB,
     get_ovs_pathing,
 )
+from ayon_nuke.version import __version__ as ADDON_VERSION
 
 try:
     import nukescripts
@@ -26,7 +27,7 @@ log = Logger.get_logger(__name__)
 # Bumped whenever OVS/publish behavior changes, so a live (dev-mode) session
 # can be verified against the source. Printed at module load and echoed by
 # the OVS flows.
-QUICK_WRITE_REV = "ovs-publish-revC"
+QUICK_WRITE_REV = "ovs-publish-revD"
 
 nuke.tprint(
     "[hornet quick_write {}] loaded from: {}".format(
@@ -190,6 +191,13 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
     )
     if family == "prerender":
         qnode.knob("tile_color").setValue(2880113407)
+
+    # Stamp the bundle version BEFORE the file_type set below: that set
+    # triggers the panel-building knobChanged callbacks, which read this
+    # knob for the visible version display. In DONT_DELETE, so it survives
+    # panel rebuilds.
+    stamp_addon_version(qnode)
+
     with qnode.begin():
         inside_write = nuke.toNode(
             "inside_" + family + os.environ["AYON_TASK_NAME"] + variant.title()
@@ -202,9 +210,45 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
     return qnode
 
 
+# Hidden knob that stamps the AYON nuke addon (bundle) version that created
+# (or last re-pointed) the node. Sourced from ayon_nuke.version.__version__,
+# which create_package.py rewrites on every build -- so a version bump +
+# rebuild updates this automatically for newly created nodes.
+ADDON_VERSION_KNOB = "hornet_addon_version"
+
 DONT_DELETE = [
     api.INSTANCE_DATA_KNOB,
+    ADDON_VERSION_KNOB,
 ]
+
+
+def _format_version_display(version_string):
+    """Grey HTML label text for the visible addon-version knob."""
+    return "<font color='#808080'>addon {}</font>".format(
+        version_string or "unstamped"
+    )
+
+
+def stamp_addon_version(node):
+    """Add/refresh a hidden knob recording the addon version on `node`.
+
+    The value is the addon version active when the node is created (or when
+    an OVS node is re-pointed). It is not auto-updated on load, so an old
+    node opened after an update still reports the version it was made with
+    -- which is the point for regression tracking.
+    """
+    knob = node.knob(ADDON_VERSION_KNOB)
+    if knob is None:
+        knob = nuke.String_Knob(ADDON_VERSION_KNOB, "AYON Nuke Addon Version")
+        knob.setVisible(False)
+        node.addKnob(knob)
+    knob.setValue(ADDON_VERSION)
+
+    # Refresh the visible label too, in case the panel was built before
+    # this stamp existed.
+    display = node.knob("addon_version_display")
+    if display is not None:
+        display.setValue(_format_version_display(ADDON_VERSION))
 
 
 def embedOptions():
@@ -576,6 +620,18 @@ def embed_quick_publish():
 
     group.addKnob(show_info_button)
 
+    # Visible, read-only addon-version stamp at the bottom of the panel.
+    # Text_Knob is a label (not editable); the value renders HTML, so we
+    # grey it out. Sourced from the hidden ADDON_VERSION_KNOB so it reflects
+    # the bundle that created (or last re-pointed) the node, not the
+    # currently-running one.
+    stamp_knob = group.knob(ADDON_VERSION_KNOB)
+    stamped_version = stamp_knob.value().strip() if stamp_knob else ""
+    version_display = nuke.Text_Knob("addon_version_display", "")
+    version_display.setValue(_format_version_display(stamped_version))
+    version_display.setFlag(nuke.STARTLINE)
+    group.addKnob(version_display)
+
 
 
 
@@ -716,6 +772,10 @@ def update_ovs_write_version(node):
                         if wnode is not None:
                             wnode["file"].setValue(fpath_new)
                             node["File output"].setValue(fpath_new)
+                            # Re-stamp: records the addon version that last
+                            # re-pointed this OVS node, and backfills the
+                            # knob on OVS nodes created before stamping.
+                            stamp_addon_version(node)
                             log.info(
                                 f"Updating ovs write path for {node_name}: {fpath_new}"
                             )
