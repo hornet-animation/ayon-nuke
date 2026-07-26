@@ -16,7 +16,6 @@ import os
 import json
 import quick_write
 import read_node_utils
-from view_manager import show as show_view_manager
 
 # =====================================================================
 # Quick Write / OVS default settings  (edit here)
@@ -308,31 +307,6 @@ nuke.addOnCreate(quick_write.restore_file_output_height, nodeClass="Group")
 
 nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
 nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
-
-### View Manager
-
-toolbar = nuke.toolbar("Nodes")
-toolbar.addCommand("Alex Dev / View Manager", "show_view_manager()")
-
-
-### Project Gizmos
-
-PROJECT_NAME = os.environ["AYON_PROJECT_NAME"]
-
-from node_manager import NodeLoader
-
-nodes_toolbar = nuke.toolbar("Nodes")
-project_toolbar = nodes_toolbar.addMenu(PROJECT_NAME)
-
-node_loader = NodeLoader()
-
-project_toolbar.addCommand(
-    name="Add Selected Nodes", command="node_loader.add_selected_nodes()"
-)
-project_toolbar.addCommand(
-    name="Add Toolset", command="node_loader.add_toolset()"
-)
-project_toolbar.addCommand(name="Reload", command="node_loader.populate()")
 
 nuke.menu("Nuke").addCommand(
     "File/Version Up Workfile",
