@@ -183,7 +183,21 @@ def getNodeSubmissionInfo(node):
     return knob_values
 
 
-def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None):
+def deadlineNetworkSubmit(
+    *, dev=False, batch=None, silent=False, node=None, overrides=None
+):
+    """Submit a Hornet Write group's render to Deadline over the web API.
+
+    Saves a timestamped copy of the script to the submission folder, gathers
+    the node's submission knobs (getNodeSubmissionInfo), builds the job
+    request (build_request) and posts it. Defaults `node` to nuke.thisNode()
+    when not given.
+
+    `overrides`, if given, is a dict whose keys match the entries that
+    getNodeSubmissionInfo() reads from the node's knobs (e.g.
+    "deadlinePriority", "deadlinePool"). Values here override what the node's
+    knobs say for this submission only -- nothing is written back to the node.
+    """
     # TODO I added miliseconds to the timestamp which forms the file name to allow for batch submissions, otherwise it fails beacuse it tries to
     # overwrite the same file each time.
     # Would be better to save once per batch which requires refactor
@@ -203,7 +217,10 @@ def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None):
         time=timestamp,
     )
 
-    body = build_request(getNodeSubmissionInfo(node), temp_script_path, node)
+    knob_values = getNodeSubmissionInfo(node)
+    if overrides:
+        knob_values.update(overrides)
+    body = build_request(knob_values, temp_script_path, node)
 
     if batch is not None:
         body["JobInfo"]["BatchName"] = batch

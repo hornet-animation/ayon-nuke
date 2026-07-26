@@ -405,7 +405,7 @@ _PRESERVE_ACROSS_FILETYPE = (
     "first", "last", "framelist",
     "publishFirst", "publishLast", "usePublishRange",
     "deadlinePriority", "deadlineChunkSize", "concurrentTasks",
-    "deadlinePool", "deadlineGroup",
+    "deadlinePool", "deadlineGroup", "skip_popup",
     "publish_on_farm", "generate_review_media", "burnin",
 )
 
@@ -591,6 +591,14 @@ def embedOptions():
         "render_or_submit(nuke.thisNode())",
     )
 
+    skip_popup = nuke.Boolean_Knob("skip_popup", "skip popup")
+    skip_popup.setValue(False)
+    skip_popup.clearFlag(nuke.STARTLINE)
+    skip_popup.setTooltip(
+        "Skip the Submission Settings popup and submit straight to Deadline "
+        "using the node's current settings."
+    )
+
     clear_temp_outputs_button = nuke.PyScript_Knob(
         "clear",
         "Clear Temp Outputs",
@@ -698,6 +706,7 @@ def embedOptions():
     group.addKnob(deadlinePool)
     group.addKnob(deadlineGroup)
     group.addKnob(submit_to_deadline)
+    group.addKnob(skip_popup)
     group.addKnob(div)
     group.addKnob(quick_publish_button)
     group.addKnob(read_from_publish_button)
@@ -932,6 +941,69 @@ def get_frame_range_with_interval(node):
         )
 
 
+# Fall back to object when nukescripts is unavailable (headless import) so the
+# module still loads; the dialog is only ever instantiated in a GUI session.
+_PanelBase = nukescripts.PythonPanel if nukescripts else object
+
+
+class SubmitSettingsDialog(_PanelBase):
+    """One-shot dialog shown before farm submission. Values entered here are
+    used for this submission only and are NOT written back to the node -- so
+    a priority of, say, 99 here doesn't persist past this submit."""
+
+    def __init__(self, node):
+        """Build the dialog, seeding every field from the node's current
+        Deadline knobs (frame list, priority, chunk, concurrency, pool,
+        group)."""
+        nukescripts.PythonPanel.__init__(self, "Submission Settings")
+        self._node = node
+
+        # Frame list -- pre-filled from the node's framelist knob. Edits here
+        # are forwarded to the Deadline submission via the overrides dict
+        # (get_frame_range_for_deadline reads from knobValues["framelist"]).
+        self.framelist = nuke.String_Knob("framelist", "Frame List")
+        fl_knob = node.knob("framelist")
+        self.framelist.setValue(fl_knob.value() if fl_knob else "")
+        self.addKnob(self.framelist)
+
+        self.priority = nuke.Int_Knob("priority", "Priority")
+        self.priority.setValue(int(node.knob("deadlinePriority").value()))
+        self.addKnob(self.priority)
+
+        self.chunk = nuke.Int_Knob("chunk", "Chunk Size")
+        self.chunk.setValue(int(node.knob("deadlineChunkSize").value()))
+        self.addKnob(self.chunk)
+
+        self.concurrent = nuke.Int_Knob("concurrent", "Concurrent Tasks")
+        self.concurrent.setValue(int(node.knob("concurrentTasks").value()))
+        self.addKnob(self.concurrent)
+
+        pool_node_knob = node.knob("deadlinePool")
+        self.pool = nuke.Enumeration_Knob(
+            "pool", "Pool", list(pool_node_knob.values())
+        )
+        self.pool.setValue(pool_node_knob.value())
+        self.addKnob(self.pool)
+
+        group_node_knob = node.knob("deadlineGroup")
+        self.group = nuke.Enumeration_Knob(
+            "group", "Group", list(group_node_knob.values())
+        )
+        self.group.setValue(group_node_knob.value())
+        self.addKnob(self.group)
+
+    def overrides(self):
+        """Return the dialog's values as a dict keyed by node knob name."""
+        return {
+            "framelist": self.framelist.value(),
+            "deadlinePriority": int(self.priority.value()),
+            "deadlineChunkSize": int(self.chunk.value()),
+            "concurrentTasks": int(self.concurrent.value()),
+            "deadlinePool": self.pool.value(),
+            "deadlineGroup": self.group.value(),
+        }
+
+
 def render_or_submit(node, local=False):
     """ wrapper for Deadline and Render Local buttons."""
     if not check_shot_context(node):
@@ -949,7 +1021,19 @@ def render_or_submit(node, local=False):
             lib.get_node_data(node, "publish_instance")["is_ovs"],
         )
     else:
-        deadlineNetworkSubmit()
+        # Farm path. When "skip popup" is on, submit straight from the node's
+        # knobs. Otherwise show the one-shot settings dialog and pass its
+        # values through as overrides (not written back to the node), so
+        # nothing persists past this submit.
+        skip = node.knob("skip_popup")
+        if skip is not None and skip.value():
+            deadlineNetworkSubmit(node=node)
+            return
+        dialog = SubmitSettingsDialog(node)
+        if not dialog.showModalDialog():
+            print(f"Submission cancelled by user on '{node.name()}'")
+            return
+        deadlineNetworkSubmit(node=node, overrides=dialog.overrides())
 
 
 def update_ovs_write_version(node):
