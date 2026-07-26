@@ -16,20 +16,47 @@ import os
 import json
 import quick_write
 import read_node_utils
+from view_manager import show as show_view_manager
+
+# =====================================================================
+# Quick Write / OVS default settings  (edit here)
+#
+# Precedence when a node is created:
+#     user TOML  >  project TOML  >  QUICK_WRITE_DEFAULTS below
+#
+# The TOML files are read live on every node create (no Nuke restart);
+# editing QUICK_WRITE_DEFAULTS here is the last-resort fallback and needs a
+# restart. "{project_root}" resolves to the AYON work root + project name.
+# Keys must match the panel knob names. deadlinePool "" -> project primary.
+# =====================================================================
+QUICK_WRITE_DEFAULTS = {
+    "deadlinePriority": 90,
+    "deadlineChunkSize": 1,
+    "concurrentTasks": 1,
+    "deadlinePool": "",
+    "deadlineGroup": "nuke",
+    "generate_review_media": True,
+    "burnin": True,
+    "publish_on_farm": False,
+}
+QUICK_WRITE_PROJECT_TOML = "{project_root}/assets/nuke/config/quick_write.toml"
+QUICK_WRITE_USER_TOML = "~/.nuke/quick_write.toml"
+
+quick_write.configure_defaults(
+    QUICK_WRITE_DEFAULTS, QUICK_WRITE_PROJECT_TOML, QUICK_WRITE_USER_TOML
+)
+# =====================================================================
 from quick_write import (
     embedOptions,
     presets,
+    embed_quick_publish,
+    show_quick_publish_info,
     quick_publish_wrapper,
     quick_write_node,
     ovs_write_node,
     update_ovs_write_version,
     _quick_write_node,
     render_or_submit,
-    on_priority_clamp,
-    set_ranges_to_globals,
-    match_publish_to_render,
-    refresh_latest_publish_display,
-    locate_obsolete_nodes,
 )
 from hornet_deadline_utils import deadlineNetworkSubmit
 from hornet_publish_utils import quick_publish
@@ -47,7 +74,7 @@ import ayon_api
 import hornet_deadline_utils
 import file_sequence
 import views_write
-from reload_hornet import reload_hornet_modules, register_quick_write_callbacks
+from reload_hornet import reload_hornet_modules
 
 from ayon_core.pipeline import registered_host
 # Version Up Workfile import
@@ -102,69 +129,19 @@ def apply_format_presets():
 
 # Hornet- helper to switch file extension to filetype
 def writes_ver_sync():
-    """Callback synchronizing version of publishable write nodes"""
+    """onScriptSave: re-point OVS Hornet write nodes at the current version.
+
+    The old Avalon-era implementation only touched nodes carrying an
+    'AvalonTab', which AYON/Hornet nodes never have -- so it was a silent
+    no-op and OVS render paths never followed a workfile version-up. The real
+    work now lives in quick_write.sync_ovs_write_versions() (keyed on the
+    publish_instance data); this wrapper keeps the existing onScriptSave
+    registration pointed at it.
+    """
     try:
-        print("Hornet- syncing version to write nodes")
-        # rootVersion = pype.get_version_from_path(nuke.root().name())
-        pattern = re.compile(r"[\._]v([0-9]+)", re.IGNORECASE)
-        rootVersion = pattern.findall(nuke.root().name())[0]
-        padding = len(rootVersion)
-        new_version = "v" + str("{" + ":0>{}".format(padding) + "}").format(
-            int(rootVersion)
-        )
-        print("new_version: {}".format(new_version))
+        quick_write.sync_ovs_write_versions()
     except Exception as e:
-        print(e)
-        return
-    groupnodes = [
-        node.nodes() for node in nuke.allNodes() if node.Class() == "Group"
-    ]
-    allnodes = [
-        node for group in groupnodes for node in group
-    ] + nuke.allNodes()
-    for each in allnodes:
-        if each.Class() == "Write":
-            # check if the node is avalon tracked
-            if each.name().startswith("inside_"):
-                avalonNode = nuke.toNode(each.name().replace("inside_", ""))
-                if avalonNode is None:
-                    print(f"Avalon node not found for {each.name()}")
-                    continue
-            else:
-                avalonNode = each
-            if "AvalonTab" not in avalonNode.knobs():
-                print("tab failure")
-                continue
-
-            avalon_knob_data = avalon.nuke.get_avalon_knob_data(
-                avalonNode, ["avalon:", "ak:"]
-            )
-            try:
-                if avalon_knob_data["families"] not in ["render", "write"]:
-                    print("families fail")
-                    log.debug(avalon_knob_data["families"])
-                    continue
-
-                node_file = each["file"].value()
-
-                # node_version = "v" + pype.get_version_from_path(node_file)
-                node_version = "v" + pattern.findall(node_file)[0]
-
-                log.debug("node_version: {}".format(node_version))
-
-                node_new_file = node_file.replace(node_version, new_version)
-                each["file"].setValue(node_new_file)
-                # H: don't need empty folders if work file isn't rendered later
-                # if not os.path.isdir(os.path.dirname(node_new_file)):
-                #    log.warning("Path does not exist! I am creating it.")
-                #    os.makedirs(os.path.dirname(node_new_file), 0o766)
-            except Exception as e:
-                print(e)
-                log.warning(
-                    "Write node: `{}` has no version in path: {}".format(
-                        each.name(), e
-                    )
-                )
+        print(f"writes_ver_sync failed: {e}")
 
 def warnSingleFrame():
     singleFrameWarn = nuke.Text_Knob(
@@ -295,45 +272,27 @@ def enable_publish_range():
 
 hornet_menu = nuke.menu("Nuke")
 m = hornet_menu.addMenu("&Hornet Write")
-m.addCommand("&Hornet Write Node", "quick_write_node()", "Ctrl+W")
+m.addCommand("&Quick Write Node", "quick_write_node()", "Ctrl+W")
 m.addCommand(
-    "&Hornet PreWrite Node",
+    "&Quick PreWrite Node",
     "quick_write_node(family='prerender')",
     "Ctrl+Shift+W",
 )
 m.addCommand(
-    "&Hornet Single Frame Write Node",
+    "&Quick Single Frame Write Node",
     "quick_write_node(family='image')"
 )
 m.addCommand("&Oversized Write Node", "ovs_write_node()")
-# Views Write Node temporarily disabled -- migrating to another package.
-# Keep the code/registration here for now; just don't expose the menu entry.
-# m.addCommand(
-#         "Views Write Node",
-#         "views_write.views_write_node(_quick_write_node)",
-#         tooltip="Create a views write node that generates write nodes for all views",
-# )
 m.addCommand(
-        "Locate Obsolete Write Nodes",
-        "locate_obsolete_nodes()",
-        tooltip="Highlight AYON write nodes whose stamped addon version is out of date",
-)
-m.addCommand(
-        "Adopt Current Shot",
-        "quick_write.adopt_current_shot_selected()",
-        tooltip="Adopt the selected Hornet Write node(s) -- or all foreign "
-                "ones, if none are selected -- to the current shot/task",
-)
-m.addCommand(
-        "Read From Rendered",
-        "quick_write.read_from_rendered_selected()",
-        "alt+r",
-        shortcutContext=2,  # DAG/node-graph only
-        tooltip="Read From Rendered on the selected Hornet Write node(s)",
+        "Views Write Node",
+        "views_write.views_write_node(_quick_write_node)",
+        tooltip="Create a views write node that generates write nodes for all views",
 )
 
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")
+nuke.addKnobChanged(embedOptions, nodeClass="Write")
+nuke.addKnobChanged(embed_quick_publish, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
 nuke.addKnobChanged(warnSingleFrame, nodeClass="Write")
 nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
@@ -342,15 +301,38 @@ nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
 nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
+# Rebuild the 'File output' multiline knob on load so it keeps its full height
+# instead of collapsing to a single line.
+nuke.addOnCreate(quick_write.restore_file_output_height, nodeClass="Group")
 
-# Views Write Node temporarily disabled -- migrating to another package.
-# nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
 
-# Quick Write callbacks (embedOptions, priority clamp, auto-match, multiline-
-# height restore, obsolete-on-load, deadline pool refresh) are registered
-# through reload_hornet so reload_hornet_modules() can rebind them to reloaded
-# code without stacking duplicates.
-register_quick_write_callbacks()
+nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
+nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
+
+### View Manager
+
+toolbar = nuke.toolbar("Nodes")
+toolbar.addCommand("Alex Dev / View Manager", "show_view_manager()")
+
+
+### Project Gizmos
+
+PROJECT_NAME = os.environ["AYON_PROJECT_NAME"]
+
+from node_manager import NodeLoader
+
+nodes_toolbar = nuke.toolbar("Nodes")
+project_toolbar = nodes_toolbar.addMenu(PROJECT_NAME)
+
+node_loader = NodeLoader()
+
+project_toolbar.addCommand(
+    name="Add Selected Nodes", command="node_loader.add_selected_nodes()"
+)
+project_toolbar.addCommand(
+    name="Add Toolset", command="node_loader.add_toolset()"
+)
+project_toolbar.addCommand(name="Reload", command="node_loader.populate()")
 
 nuke.menu("Nuke").addCommand(
     "File/Version Up Workfile",

@@ -388,12 +388,7 @@ class CollectNukeWrites(
         )
 
         if len(collected_frames) == 1:
-            # Index, don't pop(): this is the same list object that
-            # _set_existing_files_data returns to _set_expected_files. pop()
-            # mutated it to empty for single-frame publishes, leaving
-            # expectedFiles == [] -> farm fell back to a workfile render and
-            # iter_expected_files crashed on the empty list.
-            representation["files"] = collected_frames[0]
+            representation["files"] = collected_frames.pop()
         else:
             representation["files"] = collected_frames
 
@@ -494,13 +489,19 @@ class CollectNukeWrites(
         # convert only to base names
         expected_filenames = {os.path.basename(filepath) for filepath in expected_paths}
 
-        # make sure files are existing at folder
+        # make sure files are existing at folder. sorted() is essential:
+        # os.listdir() returns entries in filesystem order (alphabetical on
+        # local NTFS, but arbitrary/hash order on network/NAS shares like X:),
+        # so without this the frame list can come back out of order -- and the
+        # earlier sorted() above is discarded because it feeds a set. Downstream
+        # consumers (representation["files"], expectedFiles, ExtractReview,
+        # the ffmpeg review's -start_number) all assume first-frame-first.
         if os.path.exists(output_dir):
-            collected_frames = [
+            collected_frames = sorted(
                 filename
                 for filename in os.listdir(output_dir)
                 if filename in expected_filenames
-            ]
+            )
         else:
             self.log.warning(f"Output directory does not exist: {output_dir}")
             collected_frames = []

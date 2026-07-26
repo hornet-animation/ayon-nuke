@@ -13,9 +13,6 @@ from ayon_nuke.api.lib import (
     get_version_from_path,
     INSTANCE_DATA_KNOB,
 )
-# Safe (non-circular): quick_write only imports this module lazily inside
-# functions. Resolves the group's file-output knob old or new name.
-from quick_write import get_file_output_knob
 
 log = Logger.get_logger(__name__)
 
@@ -233,8 +230,19 @@ def assemble_publish_path(ayon_write_node):
     directory_template = anatomy.templates["publish"]["render"]["directory"]
     file_template = anatomy.templates["publish"]["render"]["file"]
 
-    root = anatomy.roots["work"].value.rstrip("/")
+    # Normalize to forward slashes: some projects configure the root with
+    # backslashes, which PurePosixPath treats as literal characters and
+    # Nuke's knob evaluation later mangles as escape sequences.
+    root = anatomy.roots["work"].value.replace("\\", "/").rstrip("/")
     project_name = context["project_name"]
+    # Publish file templates on some projects prepend the project code
+    # (e.g. "{project[code]}_..."), so the template data must carry it or
+    # format_strict fails with "Missing keys: project".
+    import ayon_api
+    try:
+        project_code = ayon_api.get_project(project_name)["code"]
+    except Exception:
+        project_code = project_name
     hierarchy = pathlib.Path(context["folder_path"].lstrip("/")).parent
     shot = pathlib.Path(context["folder_path"]).name
     product = instance_data["productType"]
@@ -262,7 +270,7 @@ def assemble_publish_path(ayon_write_node):
     server_version = get_server_pub_version(project_name, name, context["folder_path"])
     if is_version_file_linked() and is_ovs:
         file_version_num = get_version_from_path(
-            get_file_output_knob(ayon_write_node).value()
+            ayon_write_node["File output"].value()
         )
         if int(file_version_num) < server_version[0]:
             log.warning(
@@ -281,11 +289,47 @@ def assemble_publish_path(ayon_write_node):
 
 
 
+    # "Read Latest": prefer the most recent version folder that actually has
+    # a render sequence on disk, over the server-registered latest (which can
+    # be missing on disk, or -- for OVS -- point at a version with no frames).
+    # The published version folder holds the rendered frames (OVS renders into
+    # it directly; regular publishes copy frames in) and the mp4 review is a
+    # different extension, so filtering on the write's file_type reads the
+    # render, never the ffmpeg output. Falls back to the server version when
+    # nothing usable is on disk.
+    extension = ayon_write_node["file_type"].value()
+    if is_ovs:
+        _product_dir = pathlib.Path(
+            directory_template.format_map(
+                {
+                    "root": {"work": root},
+                    "project": {"name": project_name, "code": project_code},
+                    "hierarchy": hierarchy,
+                    "folder": {"name": shot},
+                    "product": {"type": product, "name": name},
+                    "version": 0,
+                }
+            )
+        ).parent
+        if _product_dir.exists():
+            _vdirs = sorted(
+                (e for e in _product_dir.iterdir()
+                 if e.is_dir() and re.match(r"^v\d+$", e.name)),
+                key=lambda p: int(p.name[1:]), reverse=True,
+            )
+            for _vdir in _vdirs:
+                if any(
+                    s.extension == extension
+                    for s in SequenceFactory.from_directory(_vdir, min_frames=1)
+                ):
+                    versions = (int(_vdir.name[1:]), _vdir.name)
+                    break
+
     publish_path = pathlib.Path(
         directory_template.format_map(
             {
                 "root": {"work": root},
-                "project": {"name": project_name},
+                "project": {"name": project_name, "code": project_code},
                 "hierarchy": hierarchy,
                 "folder": {"name": shot},
                 "product": {"type": product, "name": name},
@@ -307,13 +351,12 @@ def assemble_publish_path(ayon_write_node):
     #     log.error(f"Unexpected error: {e}")
     #     return
 
-    extension = ayon_write_node["file_type"].value()
-
     # first_frame = int(ayon_write_node["Render Start"].getValue())
     # last_frame = int(ayon_write_node["Render End"].getValue())
     # pad_count = len(str(last_frame))
 
     file_data = {
+        "project": {"name": project_name, "code": project_code},
         "folder": {"name": shot},
         "product": {"name": name},
         "frame": "%04d",
@@ -361,38 +404,9 @@ def assemble_publish_path(ayon_write_node):
         return None
 
     if is_single_frame:
-        # For single frames, drop the frame token from the render-template name.
-        result = pathlib.Path(str(result).replace(".%04d", ""))
-        target = result.name
-
-        # The integrator publishes with a template that prepends the project
-        # code (e.g. "rndAlex3_"), so the on-disk file ends with -- but is not
-        # equal to -- our render-template name. Resolve against what's actually
-        # in the version folder: prefer a suffix match (the prepended real name),
-        # then the exact render-template file, then the sole file present.
-        candidates = sorted(
-            p for p in publish_path.glob("*.{}".format(extension))
-            if p.is_file()
-        )
-        suffix_matches = [p for p in candidates if p.name.endswith(target)]
-        if len(suffix_matches) == 1:
-            result = suffix_matches[0]
-        elif result.exists():
-            pass  # exact render-template name is on disk; keep it
-        elif len(candidates) == 1:
-            result = candidates[0]
-        else:
-            msg = (
-                "No published single frame matching '{}' in {}. "
-                "Files found: {}".format(
-                    target,
-                    publish_path,
-                    [p.name for p in candidates] or "none",
-                )
-            )
-            print(msg)
-            log.error(msg)
-            return None
+        # For single frames, remove frame number from path
+        result = str(result).replace(".%04d", "")
+        result = pathlib.Path(result)
     else:
         # For sequences, add frame range
         fs = SequenceFactory.from_sequence_string_absolute(
@@ -449,6 +463,14 @@ def find_review_media(publish_dir):
 
 
 def read_from_publish(ayon_write_node, context = None, xypos = None):
+    """Create a Read (plus any sibling review-media Reads) from a write
+    node's latest published version.
+
+    Resolves the publish path via assemble_publish_path, builds a Read
+    positioned below the write node (or at `xypos`), and additionally reads
+    any published review movies in the same version folder. Backs the
+    Read From Publish / Read Latest button. Returns the main Read node.
+    """
     if (ayon_write_node) is None:
         log.error("ayon_write_node is None")
         nuke.tprint("ayon_write_node is None")
@@ -510,9 +532,7 @@ def navigate_to_render(write_node):
 
     """
 
-    file_path = pathlib.Path(
-        get_file_output_knob(write_node).evaluate()
-    ).parent
+    file_path = pathlib.Path(write_node["File output"].evaluate()).parent
     if not file_path.exists():
         return
 
@@ -536,16 +556,18 @@ def navigate_to_publish(write_node):
     if not path:
         return
 
-    # assemble_publish_path resolves a file inside the latest version folder;
-    # open that version folder itself -- not its parent, which holds every
-    # version subfolder.
     path = path if path.is_dir() else path.parent
-
+    
     if not path.exists():
         print("absolutely no publishes were discovered.")
         return
+    
+    path = path.parent
 
     print(f"Publish path: {path}")
+
+    if not path.exists():
+        return
 
     if platform.system() == "Windows":
         os.startfile(path)
