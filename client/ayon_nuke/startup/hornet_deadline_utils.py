@@ -17,6 +17,12 @@ except ImportError:
 
 ## copied from submit_nuke_to_deadline.py
 def GetDeadlineCommand():
+    """Return the full path to the `deadlinecommand` executable.
+
+    Reads DEADLINE_PATH from the environment, with the OSX
+    /Users/Shared/Thinkbox/DEADLINE_PATH file as a fallback. (Copied from
+    Thinkbox's submit_nuke_to_deadline.py.)
+    """
     # type: () -> str
     deadlineBin = ""  # type: str
     try:
@@ -38,6 +44,12 @@ def GetDeadlineCommand():
 
 
 def CallDeadlineCommand(arguments, hideWindow=True):
+    """Run `deadlinecommand` with the given argument list and return its
+    stdout as a string.
+
+    Hides the console window on Windows and forwards the current environment.
+    (Copied from Thinkbox's submit_nuke_to_deadline.py.)
+    """
     deadlineCommand = GetDeadlineCommand()  # type: str
 
     startupinfo = None  # type: ignore # this is only a windows option
@@ -94,6 +106,8 @@ def CallDeadlineCommand(arguments, hideWindow=True):
 
 
 def getSubmitterInfo():
+    """Query Deadline for submission metadata (pools, groups, max priority,
+    repo/home dirs) and return it as a dict, or None on failure."""
     try:
         return json.loads(
             CallDeadlineCommand(
@@ -133,6 +147,14 @@ def get_frame_range_for_deadline(knobValues):
 
 
 def getNodeSubmissionInfo(node):
+    """Collect the Deadline-relevant knob values off a Hornet Write group.
+
+    Reads the submission knobs (pool, group, priority, chunk, concurrency,
+    interval, framelist, file output) from the group and the first/last from
+    its interior write. Normalises the new "file" knob back to the legacy
+    "File output" key so the submission body works for old and new nodes.
+    Raises if `node` is not a Group or has no interior write.
+    """
     print("getNodeSubmissionInfo")
     # node = nuke.thisNode()
     if node is None:
@@ -190,6 +212,15 @@ def getNodeSubmissionInfo(node):
 
 
 def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None, overrides=None):
+    """Submit a Hornet Write group's render to Deadline over the web API.
+
+    Saves a timestamped copy of the script to the submission folder, gathers
+    the node's submission knobs (getNodeSubmissionInfo), builds the job
+    request (build_request) and posts it. `overrides` is a per-submission
+    dict (keyed like the node's knobs, e.g. "deadlinePriority") applied for
+    this submit only -- nothing is written back to the node. Defaults `node`
+    to nuke.thisNode() when not given.
+    """
     # TODO I added miliseconds to the timestamp which forms the file name to allow for batch submissions, otherwise it fails beacuse it tries to
     # overwrite the same file each time.
     # Would be better to save once per batch which requires refactor
@@ -299,6 +330,14 @@ def _rez_extra_info_pairs():
 
 
 def build_request(knobValues, temp_script_path, node):
+    """Build the Deadline job-submission payload (JobInfo + PluginInfo dict).
+
+    Assembles job name, frame range, pool/group/priority/chunk/concurrency,
+    the Nuke plugin config (scene file, write node, output path) and the set
+    of AYON/Hornet environment variables the farm needs to reconstruct
+    context. `knobValues` is the dict from getNodeSubmissionInfo (already
+    merged with any per-submission overrides).
+    """
     # Include critical environment variables with submission
     print("build_request")
     submissionEnvVars = [
@@ -434,6 +473,11 @@ def save_script_with_render(write_node_file_path, is_ovs=False):
 
 
 def get_deadline_server():
+    """Return the Deadline web-service base URL from project settings.
+
+    Falls back to the production bundle's deadline addon settings when the
+    project points at a localhost/empty URL.
+    """
     project_settings = get_current_project_settings()
     deadline_settings = project_settings["deadline"]
 
@@ -463,6 +507,7 @@ def get_deadline_server():
 
 
 def get_deadline_url():
+    """Return the Deadline jobs endpoint ({server}/api/jobs) for submission."""
     deadline_server = get_deadline_server()
     deadline_url = "{}/api/jobs".format(deadline_server)
     return deadline_url

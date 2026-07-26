@@ -25,6 +25,17 @@ except ImportError:
 
 log = Logger.get_logger(__name__)
 
+# Bumped whenever OVS/publish behavior changes, so a live (dev-mode) session
+# can be verified against the source. Printed at module load and echoed by
+# the OVS flows.
+QUICK_WRITE_REV = "ovs-publish-revC"
+
+nuke.tprint(
+    "[hornet quick_write {}] loaded from: {}".format(
+        QUICK_WRITE_REV, os.path.abspath(__file__)
+    )
+)
+
 # Hidden knob that stamps the AYON nuke addon (bundle) version that created
 # the node. Sourced from ayon_nuke.version.__version__, which create_package.py
 # rewrites from package.py on every build -- so a version bump + rebuild updates
@@ -80,7 +91,120 @@ presets = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Quick Write / OVS default settings
+#
+# Layered config, resolved fresh at node creation:
+#     user TOML  overrides  project TOML  overrides  hardcoded fallback
+#
+# menu.py declares the editable hardcoded fallback + the two TOML locations
+# at its top and injects them via configure_defaults() at startup (keeps the
+# knobs to tweak in one obvious place, avoids a menu<->quick_write import
+# cycle). The values below are only used if that injection hasn't run (e.g. a
+# bare module reload). TOML files are re-read on every node create, so editing
+# them takes effect without a Nuke restart; editing menu.py needs a restart.
+# ---------------------------------------------------------------------------
+_QW_DEFAULTS = {
+    "deadlinePriority": 90,
+    "deadlineChunkSize": 1,
+    "concurrentTasks": 1,
+    "deadlinePool": "",          # "" -> the project's primary Deadline pool
+    "deadlineGroup": "nuke",
+    "generate_review_media": True,
+    "burnin": True,
+    "publish_on_farm": False,
+}
+_QW_PROJECT_TOML = "{project_root}/assets/nuke/config/quick_write.toml"
+_QW_USER_TOML = "~/.nuke/quick_write.toml"
+
+
+def configure_defaults(defaults=None, project_toml=None, user_toml=None):
+    """Inject the editable defaults/paths declared at the top of menu.py."""
+    global _QW_DEFAULTS, _QW_PROJECT_TOML, _QW_USER_TOML
+    if defaults:
+        _QW_DEFAULTS = dict(defaults)
+    if project_toml:
+        _QW_PROJECT_TOML = project_toml
+    if user_toml:
+        _QW_USER_TOML = user_toml
+
+
+def _read_toml(path):
+    """Parse a TOML file to a dict; {} if missing/unparseable. Uses stdlib
+    tomllib (3.11+), falling back to tomli, then toml -- all present in the
+    AYON dependency set."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        try:
+            import tomllib as _t
+        except ImportError:
+            import tomli as _t
+        with open(path, "rb") as f:
+            return _t.load(f) or {}
+    except ImportError:
+        try:
+            import toml as _t2
+            with open(path, "r", encoding="utf-8") as f:
+                return _t2.load(f) or {}
+        except Exception as e:
+            log.warning(f"No TOML parser available; ignoring {path} ({e})")
+    except Exception as e:
+        log.warning(f"Could not read defaults TOML {path}: {e}")
+    return {}
+
+
+def _resolve_project_root():
+    """Absolute project directory (anatomy work root + project name), or ''."""
+    try:
+        from ayon_core.pipeline import Anatomy
+        root = Anatomy().roots["work"].value.replace("\\", "/").rstrip("/")
+        return "{}/{}".format(root, os.environ.get("AYON_PROJECT_NAME", ""))
+    except Exception as e:
+        log.warning(f"Could not resolve project root for defaults: {e}")
+        return ""
+
+
+def _merge_toml_over(merged, path):
+    """Layer a TOML file's values (top-level keys and/or a [quick_write]
+    table) over `merged`, in place, for keys we recognise."""
+    data = _read_toml(path)
+    if not isinstance(data, dict):
+        return
+    candidates = {k: v for k, v in data.items() if not isinstance(v, dict)}
+    if isinstance(data.get("quick_write"), dict):
+        candidates.update(data["quick_write"])
+    applied = False
+    for k, v in candidates.items():
+        if k in merged:
+            merged[k] = v
+            applied = True
+    if applied:
+        nuke.tprint(
+            "[hornet quick_write {}] applied defaults from {}".format(
+                QUICK_WRITE_REV, path
+            )
+        )
+
+
+def get_quick_write_defaults():
+    """Resolved defaults dict: hardcoded <- project TOML <- user TOML."""
+    merged = dict(_QW_DEFAULTS)
+    project_toml = os.path.expanduser(
+        _QW_PROJECT_TOML.replace("{project_root}", _resolve_project_root())
+    )
+    user_toml = os.path.expanduser(_QW_USER_TOML)
+    _merge_toml_over(merged, project_toml)   # project first ...
+    _merge_toml_over(merged, user_toml)      # ... user overrides
+    return merged
+
+
 def quick_write_node(family="render"):
+    """Menu/hotkey entry point: prompt for a variant and create a Hornet Write.
+
+    `family` selects the product type ('render', 'prerender' or 'image').
+    Aborts silently if the user cancels the variant prompt.
+    """
     # return
     variant = nuke.getInput("Variant for Hornet Write Node", "Main")
     if not variant:
@@ -90,10 +214,24 @@ def quick_write_node(family="render"):
 
 
 def ovs_write_node(family="render"):
+    """Menu entry point for an Oversized (OVS) write node.
+
+    Same as quick_write_node but flags the node OVS, so it renders straight
+    to the publish location (bypassing the temp render tree) for renders too
+    large or long to route through the normal pipeline.
+    """
     variant = nuke.getInput("Variant for Emergency Write Node", "Main").title()
     _quick_write_node(variant, family, is_ovs=True)
 
 def quick_node_data(family="render", variant="_Main", is_ovs=False):
+    """Build the publish_instance dict for a new Hornet Write node.
+
+    Assembles the AYON product/instance metadata (subset, product name,
+    folder path, hierarchy, task, etc.) from the current environment
+    (AYON_FOLDER_PATH / AYON_TASK_NAME) for the given family and variant.
+    Also the single source of truth for the expected context, used by
+    check_shot_context and the adopt flow to detect cross-shot mismatches.
+    """
     folder_path = os.environ["AYON_FOLDER_PATH"]
     if "/" in folder_path:
         ayon_asset_name = folder_path.split("/")[-1]
@@ -309,7 +447,74 @@ DONT_DELETE = [
 ]
 
 
+# Knob names whose values must survive a file_type change. embedOptions purges
+# and rebuilds the whole panel on every file_type change, re-seeding these from
+# defaults/root; we snapshot them before the purge and restore them after, so a
+# user's frame range, publish range, Deadline params and publish toggles are
+# kept. Format-specific knobs (extension + per-format Link_Knobs) are excluded
+# on purpose so they still follow the chosen format.
+_PRESERVE_ACROSS_FILETYPE = (
+    "first", "last", "framelist",
+    "publishFirst", "publishLast", "usePublishRange",
+    "deadlinePriority", "deadlineChunkSize", "concurrentTasks",
+    "deadlinePool", "deadlineGroup",
+    "publish_on_farm", "generate_review_media", "burnin",
+)
+
+
+def _snapshot_settings(group):
+    """Capture format-independent user settings before a file_type rebuild.
+
+    Returns {knob_name: value} for the _PRESERVE_ACROSS_FILETYPE knobs that
+    currently exist on `group` (empty on a node's first build). Lets a
+    file_type change keep frame range, publish range, Deadline params and the
+    publish toggles instead of resetting them to defaults.
+    """
+    snap = {}
+    for name in _PRESERVE_ACROSS_FILETYPE:
+        k = group.knob(name)
+        if k is None:
+            continue
+        try:
+            snap[name] = k.value()
+        except Exception:
+            pass
+    return snap
+
+
+def _restore_settings(group, interior, snap):
+    """Re-apply values captured by _snapshot_settings after the rebuild.
+
+    Render range (first/last) is written to the interior write node -- the
+    group's first/last are Link_Knobs onto it -- everything else to the group.
+    Only names still present are touched, so it is safe to call from either
+    rebuild path and harmless to call more than once.
+    """
+    if not snap:
+        return
+    for name, val in snap.items():
+        try:
+            if name in ("first", "last"):
+                k = interior.knob(name) if interior is not None else None
+            else:
+                k = group.knob(name)
+            if k is not None:
+                k.setValue(val)
+        except Exception:
+            pass
+
+
 def embedOptions():
+    """knobChanged handler (inner Write) that (re)builds the whole Hornet panel.
+
+    Fires when the interior write's `file_type` changes. Purges every knob on
+    the parent Group except those in DONT_DELETE, then rebuilds the full
+    property panel: the Variant field, the Output / Rendering / Publish
+    sections (format-dependent linked knobs, Deadline submission controls,
+    publish controls) and the Info tab. Runs only on real Hornet groups
+    (those carrying publish_instance) and is a no-op for other file_type
+    changes.
+    """
     nde = nuke.thisNode()
     print(f"nde: {nde.name()}")
     knb = nuke.thisKnob()
@@ -334,6 +539,11 @@ def embedOptions():
     # that skipped the purge below, leaving the previous format's Link_Knobs
     # pointing at knobs the new write lacks ("Missing knob"). Instead we always
     # purge and rebuild, defaulting unknown formats to just the universal knobs.
+
+    # Snapshot user settings before the purge; restored at the end of the
+    # rebuild so a file_type change doesn't reset them.
+    _preserved = _snapshot_settings(group)
+
     for knb in group.allKnobs():
         try:
             # never clear or touch the invisible string knob that contains the pipeline JSON data
@@ -553,7 +763,10 @@ def embedOptions():
 
     read_from_publish_button = nuke.PyScript_Knob(
         "readfrompublish",
-        "Read From Publish",
+        # "Read Latest" (newest render on disk) is OVS-only behaviour; the
+        # regular Hornet Write keeps the original "Read From Publish" label
+        # and version-linked lookup.
+        "Read Latest" if is_ovs else "Read From Publish",
         "read_node_utils.read_from_publish(nuke.thisNode())",
     )
 
@@ -584,12 +797,13 @@ def embedOptions():
         "Publish",
         "quick_publish_wrapper(nuke.thisNode())",
     )
-    deadlineChunkSize.setValue(1)
-    concurrentTasks.setValue(2)
-    # deadlinePool.setValue("local")
-    deadlinePool.setValue(get_deadlin_pool())
-    deadlineGroup.setValue("nuke")
-    deadlinePriority.setValue(90)
+    _d = get_quick_write_defaults()
+    deadlineChunkSize.setValue(int(_d["deadlineChunkSize"]))
+    concurrentTasks.setValue(int(_d["concurrentTasks"]))
+    # Empty pool default -> fall back to the project's primary Deadline pool.
+    deadlinePool.setValue(_d["deadlinePool"] or get_deadlin_pool())
+    deadlineGroup.setValue(_d["deadlineGroup"])
+    deadlinePriority.setValue(int(_d["deadlinePriority"]))
 
     usePublishRange.setFlag(nuke.STARTLINE)
     submit_to_deadline.setFlag(nuke.STARTLINE)
@@ -660,7 +874,7 @@ def embedOptions():
     publish_on_farm_checkbox = nuke.Boolean_Knob(
         "publish_on_farm", "Publish on Farm"
     )
-    publish_on_farm_checkbox.setValue(False)
+    publish_on_farm_checkbox.setValue(bool(_d["publish_on_farm"]))
     publish_on_farm_checkbox.setTooltip(
         "Run the full publish on the farm, including review media "
         "generation. Unchecked runs the publish (and review extraction) "
@@ -719,7 +933,7 @@ def embedOptions():
         generate_review_checkbox = nuke.Boolean_Knob(
             "generate_review_media", "Generate Review Media"
         )
-        generate_review_checkbox.setValue(True)
+        generate_review_checkbox.setValue(bool(_d["generate_review_media"]))
         generate_review_checkbox.setTooltip(
             "Generate review media (mp4/mov) for the rendered sequence. "
             "Unchecked skips ExtractFFmpegReview entirely."
@@ -727,7 +941,7 @@ def embedOptions():
         generate_review_checkbox.setFlag(nuke.STARTLINE)
 
         burnin_checkbox = nuke.Boolean_Knob("burnin", "Apply burnins to Review")
-        burnin_checkbox.setValue(True)
+        burnin_checkbox.setValue(bool(_d["burnin"]))
         burnin_checkbox.setTooltip(
             "Add burnin information (timecode, frame numbers, etc.) to "
             "review media. Unchecked disables burnins."
@@ -810,6 +1024,12 @@ def embedOptions():
         group["views"].setValue(nuke.views()[0])
     except Exception as e:
         print(f"Error setting views: {e}")
+
+    # Restore the settings that should survive a file_type change (frame range,
+    # publish range, Deadline params, publish toggles) instead of resetting to
+    # defaults. Done before the range-colour/header refreshes so they act on
+    # the restored values.
+    _restore_settings(group, nde, _preserved)
 
     # Initial label-color state for the publish range knobs.
     update_publish_range_color(group)
@@ -1034,6 +1254,255 @@ def read_from_rendered_selected():
         read_node_utils.write_to_read(node, allow_relative=False)
 
 
+def _submittable_write_nodes():
+    """Every Hornet Write node with a fully-built panel (has the Deadline
+    submission knobs), sorted by name -- the candidates for batch render."""
+    nodes = [
+        n for n in get_all_ayon_write_nodes()
+        if n.knob("framelist") is not None
+        and n.knob("deadlinePriority") is not None
+    ]
+    return sorted(nodes, key=lambda n: n.name())
+
+
+def batch_render():
+    """Menu entry point: batch-submit Hornet Write nodes to Deadline.
+
+    Opens a dialog listing every submittable Hornet Write node with a tick
+    box, an editable frame range, and the per-node Deadline settings
+    (priority / chunk / concurrent / pool / group) seeded from each node.
+    Submitting sends every ticked node to Deadline at once, using each row's
+    values as per-submission overrides (nothing is written back to the nodes)
+    through the same path as the on-node Submit button. Cross-shot guards run
+    per node; foreign-shot nodes are skipped and reported rather than silently
+    rendered into another shot.
+    """
+    from qtpy import QtWidgets, QtCore
+
+    nodes = _submittable_write_nodes()
+    if not nodes:
+        nuke.message("No submittable Hornet Write nodes found in this script.")
+        return
+
+    COLS = ["", "Node", "Frame Range", "Priority", "Chunk",
+            "Concurrent", "Pool", "Group"]
+
+    class _BatchRenderDialog(QtWidgets.QDialog):
+        def __init__(self, nodes, parent=None):
+            super().__init__(parent)
+            self._nodes = nodes
+            self._rows = []
+            self._build()
+
+        def _build(self):
+            self.setWindowTitle("Hornet Batch Render")
+            self.resize(920, 420)
+            layout = QtWidgets.QVBoxLayout(self)
+
+            top = QtWidgets.QHBoxLayout()
+            for label, cb in (
+                ("Select All", lambda: self._set_all(True)),
+                ("Select None", lambda: self._set_all(False)),
+                ("Ranges → Script Globals", self._ranges_to_globals),
+            ):
+                btn = QtWidgets.QPushButton(label)
+                btn.clicked.connect(cb)
+                top.addWidget(btn)
+            top.addStretch()
+            layout.addLayout(top)
+
+            table = QtWidgets.QTableWidget(len(self._nodes), len(COLS))
+            table.setHorizontalHeaderLabels(COLS)
+            table.verticalHeader().setVisible(False)
+            table.setAlternatingRowColors(True)
+            self._table = table
+            layout.addWidget(table)
+
+            def _int_knob(node, name, default):
+                k = node.knob(name)
+                try:
+                    return int(k.value()) if k is not None else default
+                except Exception:
+                    return default
+
+            for row, node in enumerate(self._nodes):
+                try:
+                    is_ovs = bool(parse_publish_instance(node).get("is_ovs"))
+                except Exception:
+                    is_ovs = False
+
+                # 0: centered checkbox
+                check = QtWidgets.QCheckBox()
+                check.setChecked(True)
+                holder = QtWidgets.QWidget()
+                hl = QtWidgets.QHBoxLayout(holder)
+                hl.addWidget(check)
+                hl.setAlignment(QtCore.Qt.AlignCenter)
+                hl.setContentsMargins(0, 0, 0, 0)
+                table.setCellWidget(row, 0, holder)
+
+                # 1: node name (read-only), OVS flagged
+                name_item = QtWidgets.QTableWidgetItem(
+                    node.name() + ("  [OVS]" if is_ovs else "")
+                )
+                name_item.setFlags(
+                    name_item.flags() & ~QtCore.Qt.ItemIsEditable
+                )
+                table.setItem(row, 1, name_item)
+
+                # 2: frame range (editable)
+                fl = node.knob("framelist")
+                range_item = QtWidgets.QTableWidgetItem(
+                    fl.value() if fl is not None else ""
+                )
+                table.setItem(row, 2, range_item)
+
+                # 3-5: priority / chunk / concurrent
+                pri = QtWidgets.QSpinBox()
+                pri.setRange(0, 100)
+                pri.setValue(_int_knob(node, "deadlinePriority", 90))
+                table.setCellWidget(row, 3, pri)
+
+                chunk = QtWidgets.QSpinBox()
+                chunk.setRange(1, 10000)
+                chunk.setValue(_int_knob(node, "deadlineChunkSize", 1))
+                table.setCellWidget(row, 4, chunk)
+
+                conc = QtWidgets.QSpinBox()
+                conc.setRange(1, 100)
+                conc.setValue(_int_knob(node, "concurrentTasks", 1))
+                table.setCellWidget(row, 5, conc)
+
+                # 6-7: pool / group dropdowns
+                pool_knob = node.knob("deadlinePool")
+                pool = QtWidgets.QComboBox()
+                if pool_knob is not None:
+                    pool.addItems(list(pool_knob.values()))
+                    pool.setCurrentText(pool_knob.value())
+                table.setCellWidget(row, 6, pool)
+
+                group_knob = node.knob("deadlineGroup")
+                grp = QtWidgets.QComboBox()
+                if group_knob is not None:
+                    grp.addItems(list(group_knob.values()))
+                    grp.setCurrentText(group_knob.value())
+                table.setCellWidget(row, 7, grp)
+
+                self._rows.append({
+                    "node": node, "check": check, "range": range_item,
+                    "priority": pri, "chunk": chunk, "concurrent": conc,
+                    "pool": pool, "group": grp,
+                })
+
+            table.resizeColumnsToContents()
+            table.setColumnWidth(0, 40)
+            table.horizontalHeader().setSectionResizeMode(
+                1, QtWidgets.QHeaderView.Stretch
+            )
+
+            btns = QtWidgets.QHBoxLayout()
+            btns.addStretch()
+            submit = QtWidgets.QPushButton("Submit Selected to Deadline")
+            submit.clicked.connect(self._submit)
+            cancel = QtWidgets.QPushButton("Close")
+            cancel.clicked.connect(self.reject)
+            btns.addWidget(submit)
+            btns.addWidget(cancel)
+            layout.addLayout(btns)
+
+        def _set_all(self, state):
+            for r in self._rows:
+                r["check"].setChecked(state)
+
+        def _ranges_to_globals(self):
+            rng = "{}-{}".format(
+                int(nuke.root().firstFrame()), int(nuke.root().lastFrame())
+            )
+            for r in self._rows:
+                r["range"].setText(rng)
+
+        def _submit(self):
+            chosen = [r for r in self._rows if r["check"].isChecked()]
+            if not chosen:
+                nuke.message("No nodes ticked.")
+                return
+
+            # Whole-script duplicate-variant pre-flight, once (same gate as
+            # the on-node submit).
+            dupes = find_duplicate_variants_in_script()
+            if dupes:
+                lines = "\n".join(
+                    "  '{}' used by: {}".format(v.lstrip("_"), ", ".join(ns))
+                    for v, ns in dupes.items()
+                )
+                nuke.message(
+                    "Cannot batch render: duplicate variant names in this "
+                    "script.\n\n" + lines
+                )
+                return
+
+            submitted, skipped, failed = [], [], []
+            for r in chosen:
+                node = r["node"]
+                name = node.name()
+                try:
+                    if not check_shot_context(node):
+                        skipped.append((name, "shot-context fix declined"))
+                        continue
+                    if _render_path_shot_mismatch(node) is not None:
+                        skipped.append(
+                            (name, "renders into another shot -- adopt first")
+                        )
+                        continue
+                    try:
+                        is_ovs = lib.get_node_data(
+                            node, "publish_instance"
+                        ).get("is_ovs")
+                    except Exception:
+                        is_ovs = False
+                    if is_ovs:
+                        update_ovs_write_version(node)
+                        if node.knob("_cancelled") and \
+                                node["_cancelled"].value():
+                            skipped.append((name, "OVS overwrite cancelled"))
+                            continue
+                    deadlineNetworkSubmit(node=node, overrides={
+                        "framelist": r["range"].text().strip(),
+                        "deadlinePriority": int(r["priority"].value()),
+                        "deadlineChunkSize": int(r["chunk"].value()),
+                        "concurrentTasks": int(r["concurrent"].value()),
+                        "deadlinePool": r["pool"].currentText(),
+                        "deadlineGroup": r["group"].currentText(),
+                    })
+                    submitted.append(name)
+                except Exception as e:
+                    log.error(f"Batch submit failed for '{name}': {e}")
+                    failed.append((name, str(e)))
+
+            msg = "Submitted {} node(s) to Deadline.".format(len(submitted))
+            if submitted:
+                msg += "\n\n" + "\n".join("  + " + n for n in submitted)
+            if skipped:
+                msg += "\n\nSkipped {}:\n".format(len(skipped)) + "\n".join(
+                    "  - {} ({})".format(n, why) for n, why in skipped
+                )
+            if failed:
+                msg += "\n\nFailed {}:\n".format(len(failed)) + "\n".join(
+                    "  ! {} ({})".format(n, why) for n, why in failed
+                )
+            nuke.message(msg)
+            if submitted and not skipped and not failed:
+                self.accept()
+
+    app = QtWidgets.QApplication.instance()
+    parent = app.activeWindow() if app is not None else None
+    dlg = _BatchRenderDialog(nodes, parent)
+    if hasattr(dlg, "exec_"):
+        dlg.exec_()
+    else:
+        dlg.exec()
+
+
 PRIORITY_KNOB_MAX = 90
 
 
@@ -1071,6 +1540,9 @@ class SubmitSettingsDialog(_PanelBase):
     a priority of, say, 99 here doesn't persist past this submit."""
 
     def __init__(self, node):
+        """Build the dialog, seeding every field from the node's current
+        Deadline knobs (frame list, priority, chunk, concurrency, pool,
+        group)."""
         nukescripts.PythonPanel.__init__(self, "Submission Settings")
         self._node = node
 
@@ -1141,6 +1613,8 @@ class InstanceDataDialog(_PanelBase):
     """Read-only view of a node's publish_instance JSON with a copy button."""
 
     def __init__(self, node):
+        """Build the dialog, pretty-printing the node's publish_instance JSON
+        into a read-only field (or an error string if it won't parse)."""
         nukescripts.PythonPanel.__init__(
             self, f"Instance Data -- {node.name()}"
         )
@@ -1158,6 +1632,7 @@ class InstanceDataDialog(_PanelBase):
         self.addKnob(self.copy_btn)
 
     def knobChanged(self, knob):
+        """Copy the JSON to the clipboard when the Copy button is pressed."""
         if knob is not None and knob.name() == "copy_json":
             if _copy_to_clipboard(self._json_text):
                 nuke.message("Instance data copied to clipboard.")
@@ -1302,10 +1777,11 @@ def update_ovs_write_version(node):
                 )
                 if prompt:
                     try:
-                        fpath_new = get_ovs_pathing(data)
+                        fpath_new = get_ovs_pathing(
+                            _ovs_data_with_current_ext(node, data)
+                        )
                         node_name = node["name"].value()
-                        interior_write = "inside_" + node_name
-                        wnode = nuke.toNode(interior_write)
+                        wnode = _find_interior_write(node)
                         if wnode is not None:
                             wnode["file"].setValue(fpath_new)
                             out_knob = get_file_output_knob(node)
@@ -1321,7 +1797,7 @@ def update_ovs_write_version(node):
                             nuke.toNode(node_name)
                         else:
                             log.warning(
-                                f"Interior write node {interior_write} not found, cannot set file path."
+                                f"No interior write node found in {node_name}, cannot set file path."
                             )
                     except Exception as e:
                         log.error(f"Error setting ovs write version: {e}")
@@ -1436,7 +1912,107 @@ def locate_obsolete_on_load():
         log.warning(f"locate_obsolete_on_load failed: {e}")
 
 
+def _ovs_data_with_current_ext(node, data):
+    """Return a copy of the instance data with `ext` corrected to what the
+    node actually renders.
+
+    The JSON stores the extension from node-creation time (imageio default,
+    usually exr), but _quick_write_node flips file_type afterwards (dpx for
+    renders) without updating the JSON -- so get_ovs_pathing(data) would
+    rebuild paths with the wrong extension and lose track of real renders.
+    """
+    ext = None
+    interior = _find_interior_write(node)
+    if interior is not None:
+        try:
+            ext = (interior["file_type"].value() or "").strip() or None
+        except Exception:
+            ext = None
+        if not ext:
+            try:
+                ext = os.path.splitext(
+                    interior["file"].value()
+                )[1].lstrip(".") or None
+            except Exception:
+                ext = None
+    if ext and ext != data.get("ext"):
+        data = dict(data)
+        data["ext"] = ext
+    return data
+
+
+def sync_ovs_write_versions():
+    """onScriptSave hook: point OVS write nodes at the current publish version.
+
+    OVS nodes render straight into the versioned publish tree, so when the
+    workfile version increments their output path must follow -- otherwise the
+    node keeps writing to the old version folder. Non-OVS writes render to an
+    unversioned temp path, so they are left alone.
+
+    Only runs when workfile and publish versions are linked (the Hornet
+    setup): in that mode get_ovs_pathing() resolves to the workfile-matched
+    version, so re-deriving on every save is idempotent. When versions are NOT
+    linked, get_ovs_pathing() increments each call, which would bump the
+    version on every save -- so we skip and leave versioning to render/publish
+    time.
+    """
+    # Stand down while a publish is running: quick_publish saves the script
+    # mid-run, and re-syncing then would yank a deliberately re-pointed OVS
+    # node back to the (empty) workfile-version path.
+    if _OVS_SYNC_SUSPENDED["active"]:
+        nuke.tprint(
+            "[hornet quick_write {}] OVS save-sync suspended "
+            "(publish in progress)".format(QUICK_WRITE_REV)
+        )
+        return
+
+    # Collect OVS nodes first -- this is cheap and local (just parses the
+    # publish_instance JSON). is_version_file_linked() below makes a server
+    # round-trip, and this runs on EVERY save, so bail before that when the
+    # script has no OVS nodes (the common case).
+    ovs_nodes = []
+    for node in get_all_ayon_write_nodes():
+        try:
+            data = parse_publish_instance(node)
+        except Exception:
+            continue
+        if data.get("is_ovs"):
+            ovs_nodes.append((node, data))
+    if not ovs_nodes:
+        return
+
+    try:
+        if not lib.is_version_file_linked():
+            return
+    except Exception as e:
+        log.warning(f"OVS version sync skipped (link check failed): {e}")
+        return
+
+    for node, data in ovs_nodes:
+        try:
+            fpath_new = get_ovs_pathing(_ovs_data_with_current_ext(node, data))
+        except Exception as e:
+            log.warning(
+                f"Could not resolve OVS path for '{node.name()}': {e}"
+            )
+            continue
+        interior = _find_interior_write(node)
+        if interior is not None and "file" in interior.knobs():
+            interior["file"].setValue(fpath_new)
+        out_knob = get_file_output_knob(node)
+        if out_knob is not None:
+            out_knob.setValue(fpath_new)
+        nuke.tprint(
+            "[hornet quick_write {}] OVS save-sync re-pointed '{}' -> "
+            "{}".format(QUICK_WRITE_REV, node.name(), fpath_new)
+        )
+
+
 def get_all_ayon_write_nodes():
+    """Return every AYON/Hornet write node in the script.
+
+    Identifies them as Group nodes carrying the publish_instance data knob.
+    """
     ayon_write_nodes = []
 
     for node in nuke.allNodes():
@@ -1449,6 +2025,11 @@ def get_all_ayon_write_nodes():
 
 
 def parse_publish_instance(qnode):
+    """Parse a node's publish_instance JSON into a dict.
+
+    Strips the leading 'JSON:::' marker (7 chars) before decoding. Raises if
+    the knob is missing or the value is not valid JSON.
+    """
     return json.loads(qnode.knob(api.INSTANCE_DATA_KNOB).value()[7:])
 
 
@@ -1567,13 +2148,273 @@ def _confirm_render_exists(node):
     return False
 
 
+# While a publish runs, the onScriptSave OVS version-sync must stand down:
+# quick_publish() saves the script mid-run, and the sync would re-point a
+# deliberately re-pointed OVS node back at the (empty) workfile version.
+_OVS_SYNC_SUSPENDED = {"active": False}
+
+
+def _frames_matching_pattern(path_pattern):
+    """Return files on disk matching a frame-numbered output pattern
+    (%04d / #### tokens are globbed)."""
+    import glob as _glob
+    pat = re.sub(r"%0?\d*d", "*", path_pattern)
+    pat = re.sub(r"#+", "*", pat)
+    return _glob.glob(pat)
+
+
+def _ovs_version_is_published(data, version_num):
+    """True when the node's product already has `version_num` on the AYON
+    server. Raises on server/lookup errors -- the caller decides the
+    fallback policy."""
+    import ayon_api
+    project = os.environ.get("AYON_PROJECT_NAME")
+    folder_path = data.get("folderPath")
+    product_name = data.get("productName")
+    if not (project and folder_path and product_name):
+        return False
+    folder = ayon_api.get_folder_by_path(project, folder_path)
+    if not folder:
+        return False
+    product = ayon_api.get_product_by_name(
+        project, product_name, folder["id"]
+    )
+    if not product:
+        return False
+    return ayon_api.get_version_by_name(
+        project, version_num, product["id"]
+    ) is not None
+
+
+def _find_publishable_ovs_version(path, data):
+    """Search the OVS product directory backwards (newest version first) for
+    a render that is both on disk and not yet published.
+
+    `path` is the node's current output path
+    (.../product/vNNN/name_vNNN.%04d.ext); candidate paths are derived by
+    swapping the version folder/filename tokens. A candidate must have files
+    matching the frame pattern, parse as a coherent sequence (file_sequence
+    check, run only on globbed candidates and soft-failing to the glob
+    result), and not already exist as a version on the AYON server.
+
+    Returns (version, path_at_version, skipped, already_published). `skipped`
+    is a list of (version, reason) pairs for reporting. `already_published` is
+    the version number that stopped the search because the most recent render
+    on disk is already published (else None) -- we stop there rather than
+    walking back to an older, unpublished render. (None, None, skipped, None)
+    when no render exists on disk at all.
+    """
+    version_dir = os.path.dirname(path)
+    product_dir = os.path.dirname(version_dir)
+    vname_old = os.path.basename(version_dir)
+    base_old = os.path.basename(path)
+    skipped = []
+    if not os.path.isdir(product_dir):
+        return None, None, skipped, None
+
+    candidates = []
+    for entry in os.listdir(product_dir):
+        m = re.match(r"^v(\d+)$", entry)
+        if m and os.path.isdir(os.path.join(product_dir, entry)):
+            candidates.append((int(m.group(1)), entry))
+
+    stem_old, ext_old = os.path.splitext(base_old)
+
+    for num, vname in sorted(candidates, reverse=True):
+        stem_cand = stem_old.replace(vname_old, vname)
+        cand_path = os.path.join(
+            product_dir, vname, stem_cand + ext_old
+        ).replace("\\", "/")
+        frames = _frames_matching_pattern(cand_path)
+        if not frames:
+            # Extension drift fallback: the node's path extension can be
+            # stale (the instance JSON keeps the creation-time ext, usually
+            # exr, while the node actually renders e.g. dpx). Accept frames
+            # with any extension and adopt the one found on disk.
+            loose = _frames_matching_pattern(
+                os.path.join(product_dir, vname, stem_cand + ".*")
+                .replace("\\", "/")
+            )
+            if loose:
+                ext_found = os.path.splitext(loose[0])[1]
+                frames = [
+                    f for f in loose
+                    if os.path.splitext(f)[1].lower() == ext_found.lower()
+                ]
+                cand_path = os.path.join(
+                    product_dir, vname, stem_cand + ext_found
+                ).replace("\\", "/")
+                log.warning(
+                    f"OVS search: {vname} frames found with extension "
+                    f"'{ext_found}' (node path says '{ext_old}'); using "
+                    f"what's on disk"
+                )
+        if not frames:
+            skipped.append((num, "no frames on disk"))
+            continue
+        if len(frames) > 1:
+            try:
+                from file_sequence import SequenceFactory
+                if not SequenceFactory.from_filenames(
+                    [os.path.basename(f) for f in frames]
+                ):
+                    skipped.append((num, "files do not parse as a sequence"))
+                    continue
+            except Exception:
+                pass  # validation is best-effort; trust the glob
+        try:
+            if _ovs_version_is_published(data, num):
+                # This is the most recent version that actually holds a
+                # render on disk, and it is already published. Stop here
+                # rather than walking further back to an older, unpublished
+                # render -- publishing that would resurrect a superseded
+                # version.
+                skipped.append((num, "already published"))
+                return None, None, skipped, num
+        except Exception as e:
+            log.warning(
+                f"Could not check the server for v{num:03d} ({e}); "
+                f"treating it as unpublished"
+            )
+        return num, cand_path, skipped, None
+    return None, None, skipped, None
+
+
+def _confirm_ovs_publish_version(node):
+    """OVS publish pre-flight: ensure we publish a version that has frames.
+
+    OVS nodes render straight into the versioned publish tree, and the
+    publish pipeline targets the CURRENT workfile version. After a
+    render -> version-up -> publish sequence, both the node path and the
+    pipeline point at a version folder with no frames and the publish
+    fails. This resolves the newest version folder that actually holds a
+    valid render, re-points the node at it, and asks before publishing
+    when that version differs from the script version.
+
+    Returns True to proceed, False to abort.
+    """
+    try:
+        data = parse_publish_instance(node)
+    except Exception:
+        return True
+    if not data.get("is_ovs"):
+        return True
+
+    nuke.tprint(
+        "[hornet quick_write {}] OVS publish pre-flight running on "
+        "'{}'".format(QUICK_WRITE_REV, node.name())
+    )
+
+    out_knob = get_file_output_knob(node)
+    if out_knob is None:
+        return True
+    path = (out_knob.value() or "").replace("\\", "/")
+    if not path:
+        return True
+
+    try:
+        script_version = int(lib.get_version_from_path(nuke.Root().name()))
+    except Exception:
+        script_version = None
+
+    chosen, chosen_path, skipped, already_pub = _find_publishable_ovs_version(
+        path, data
+    )
+    nuke.tprint(
+        "[hornet quick_write {}] OVS search: chose {} | skipped: {}".format(
+            QUICK_WRITE_REV,
+            "v{:03d}".format(chosen) if chosen is not None else "nothing",
+            ", ".join(
+                "v{:03d} ({})".format(n, w) for n, w in skipped
+            ) or "none",
+        )
+    )
+
+    if chosen is None:
+        if already_pub is not None:
+            nuke.message(
+                "The most recent OVS render (v{:03d}) is already "
+                "published.\n\nNothing to publish -- render a new version "
+                "first.".format(already_pub)
+            )
+            return False
+        lines = "\n".join(
+            "  v{:03d}: {}".format(num, why) for num, why in skipped
+        ) or "  (no version folders found)"
+        nuke.message(
+            "Nothing publishable for this OVS node.\n\n"
+            "Searched {}:\n{}\n\n"
+            "Render a new version before publishing.".format(
+                os.path.dirname(os.path.dirname(path)), lines
+            )
+        )
+        return False
+
+    try:
+        path_version = int(lib.get_version_from_path(path))
+    except Exception:
+        path_version = None
+
+    # Node target, newest unpublished render and script version all agree:
+    # publish silently, exactly like a normal same-version flow.
+    if chosen == path_version and (
+        script_version is None or chosen == script_version
+    ):
+        return True
+
+    prompt = "About to publish OVS render v{:03d}".format(chosen)
+    if script_version is not None:
+        prompt += " -- the script is at v{:03d}".format(script_version)
+    prompt += ".\n"
+    if skipped:
+        prompt += "\nSkipped: " + ", ".join(
+            "v{:03d} ({})".format(num, why) for num, why in skipped
+        ) + "\n"
+    prompt += "\nProceed?"
+    if not nuke.ask(prompt):
+        return False
+
+    # Re-point the node so collection reads -- and integration publishes --
+    # the version that actually holds the chosen render.
+    if chosen != path_version:
+        interior = _find_interior_write(node)
+        if interior is not None and "file" in interior.knobs():
+            interior["file"].setValue(chosen_path)
+        out_knob.setValue(chosen_path)
+        log.info(f"OVS publish re-pointed '{node.name()}' to {chosen_path}")
+    return True
+
+
 def quick_publish_wrapper(node):
+    """Publish button handler: run pre-flight checks then quick_publish().
+
+    Gates in order: shot-context match, OVS version resolution (OVS nodes
+    only), rendered frames exist on disk, publish range vs render range,
+    and target version not already published (non-OVS only -- OVS versions
+    are resolved by the OVS gate). Reads the review / burn-in /
+    publish-on-farm options off the node and forwards them to
+    hornet_publish_utils.quick_publish, then refreshes the latest-version
+    readout. Aborts (with a console note) if any gate fails.
+    """
     from hornet_publish_utils import quick_publish
 
     # Same shot-context gate as render/submit: without it a node pasted from
     # another shot publishes into that other shot with no warning at all.
     if not check_shot_context(node):
         print("Publish cancelled: shot context mismatch")
+        return
+
+    try:
+        is_ovs = bool(parse_publish_instance(node).get("is_ovs"))
+    except Exception:
+        is_ovs = False
+
+    # OVS: make sure the publish targets a version that actually has frames
+    # (otherwise the pipeline publishes the current script version, which
+    # fails after render -> version-up -> publish). Runs before the
+    # render-exists gate so a re-pointed path passes it.
+    if not _confirm_ovs_publish_version(node):
+        print("Publish cancelled: OVS version check")
         return
 
     if not _confirm_render_exists(node):
@@ -1584,7 +2425,10 @@ def quick_publish_wrapper(node):
         print("Publish cancelled: publish range differs from render range")
         return
 
-    if not _confirm_publish_version(node):
+    # The workfile-vs-server version pre-check compares against the CURRENT
+    # workfile version, which for OVS is no longer what gets published (the
+    # OVS gate above resolved the real version), so skip it for OVS.
+    if not is_ovs and not _confirm_publish_version(node):
         print("Publish cancelled: target version already exists")
         return
 
@@ -1601,20 +2445,26 @@ def quick_publish_wrapper(node):
     burnin_knob = node.knobs().get("burnin")
     burnin = burnin_knob.value() if burnin_knob else False
 
-    with nuke.root():
-        quick_publish(
-            node,
-            review=review,
-            review_farm=review_farm,
-            integrate_farm=integrate_farm,
-            burnin=burnin,
-        )
+    _OVS_SYNC_SUSPENDED["active"] = True
+    try:
+        with nuke.root():
+            quick_publish(
+                node,
+                review=review,
+                review_farm=review_farm,
+                integrate_farm=integrate_farm,
+                burnin=burnin,
+            )
+    finally:
+        _OVS_SYNC_SUSPENDED["active"] = False
 
     # Reflect the new version in the read-only label (best effort).
     refresh_latest_publish_display(node)
 
 
 def get_deadlin_pool():
+    """Return the project's default (primary) Deadline pool from settings,
+    or 'local' if the setting isn't present."""
     settings = get_current_project_settings()
     try:
         return settings["deadline"]["publish"]["CollectDeadlinePools"][
@@ -1624,6 +2474,9 @@ def get_deadlin_pool():
         return "local"
 
 def refresh_deadline_pools(quick_write_node):
+    """Re-query the live Deadline pool list and repopulate the node's
+    deadlinePool enum, preserving the current selection when it still
+    exists (else falling back to the first entry)."""
     pool_knob = quick_write_node.knobs().get("deadlinePool")
     # group_knob = quick_write_node.knobs().get("deadlineGroup")
     current_pool = pool_knob.value()
@@ -1635,6 +2488,9 @@ def refresh_deadline_pools(quick_write_node):
         pool_knob.setValue(pool_knob.values()[0])
 
 def refresh_deadline_groups(quick_write_node):
+    """Re-query the live Deadline group list and repopulate the node's
+    deadlineGroup enum, preserving the current selection when it still
+    exists (else falling back to the first entry)."""
     group_knob = quick_write_node.knobs().get("deadlineGroup")
     current_group = group_knob.value()
     group_knob.setValues(hornet_deadline_utils.get_deadline_groups())
@@ -1645,6 +2501,9 @@ def refresh_deadline_groups(quick_write_node):
 
 
 def refresh_deadline_callback():
+    """knobChanged handler (Group) that refreshes the Deadline pool/group
+    lists on demand: opening either enum re-queries Deadline so the choices
+    reflect the current farm state rather than what was cached at build."""
     node = nuke.thisNode()
     knob = nuke.thisKnob()
     if knob.name() == "deadlinePool":
@@ -1658,9 +2517,20 @@ def refresh_deadline_callback():
         except Exception as e:
             log.error(f"Error refreshing deadline groups: {e}")
 
-## we may have a node copied from another script with the wrong instance data
-## this can result in rendering to someone elses shot. Alert the user
 def check_shot_context(node):
+    """Guard run before render/submit/publish: verify the node's stored
+    context matches the current shot/task.
+
+    A node copied from another script (or shot) keeps its original
+    folderPath/hierarchy/folder/task, which would render or publish into
+    someone else's shot. On mismatch, offer to patch the instance data to
+    the current context; if the user declines, warn and let them proceed
+    into the foreign shot or cancel.
+
+    Returns True to allow the operation to continue, False to abort. Note it
+    patches only the instance JSON -- the render *path* is repathed
+    separately by the adopt flow / the render-path gate.
+    """
     if INSTANCE_DATA_KNOB not in node.knobs():
         return True
     data = json.loads(
@@ -1862,6 +2732,7 @@ def _update_path_knobs(node, new_node_name, old_subset, new_subset):
     """
 
     def _rewrite(old_path):
+        """Context-rewrite one path, falling back to subset substitution."""
         rewritten = _rewrite_path_for_context(old_path, old_subset, new_subset)
         if rewritten is not None:
             return rewritten
@@ -2092,6 +2963,8 @@ def flag_script_loading():
 
 
 def _clear_script_loading_flag():
+    """Deferred companion to flag_script_loading: clears the flag once the
+    synchronous script load has finished, re-enabling paste dedup."""
     _SCRIPT_LOADING["active"] = False
 
 
@@ -2270,6 +3143,8 @@ def _repath_to_current_work(node, new_subset):
     work = os.environ.get("AYON_WORKDIR", "").replace("\\", "/").rstrip("/")
 
     def _rewrite(old_path):
+        """Re-anchor one path onto the current work dir, swapping the subset
+        that follows the /renders/nuke/ marker for new_subset."""
         if not old_path or not work:
             return None
         p = old_path.replace("\\", "/")

@@ -468,29 +468,54 @@ class ExtractFFmpegReview(
         folder, where the renders actually live during extract.
         """
         ext = instance.data.get("ext")
-        frame_start = int(instance.data["frameStart"])
         for rep in instance.data.get("representations", []):
             if rep.get("ext") != ext:
                 continue
             staging = rep.get("stagingDir")
             files = rep.get("files")
-            first = files[0] if isinstance(files, (list, tuple)) else files
-            if not staging or not first:
+            if not staging or not files:
                 continue
-            # ``render_v001.0001.exr`` (frame=1001) → ``render_v001.%04d.exr``
-            pattern = os.path.join(staging, first)
-            for m in reversed(list(re.finditer(r"\d+", first))):
-                if int(m.group()) == frame_start:
-                    pattern = os.path.join(
-                        staging,
-                        f"{first[:m.start()]}%0{len(m.group())}d{first[m.end():]}",
-                    )
-                    break
+            file_list = (
+                list(files) if isinstance(files, (list, tuple)) else [files]
+            )
+
+            # The frame number is the last run of digits in the name (the
+            # field just before the extension, by sequence-naming convention).
+            # Collect can hand us the files in arbitrary order, so sort by that
+            # number and key off the TRUE first frame -- not files[0] (which
+            # may be any frame), and not instance frameStart (which can be the
+            # render range while only a sub-range was rendered/published). The
+            # start frame passed to ffmpeg must match the first file actually
+            # on disk, or -start_number points at a frame that isn't there.
+            def _frame_num(fn):
+                nums = re.findall(r"\d+", fn)
+                return int(nums[-1]) if nums else None
+
+            numbered = [
+                (f, n) for f, n in ((f, _frame_num(f)) for f in file_list)
+                if n is not None
+            ]
+            if not numbered:
+                # No frame number to key on (a single still). Feed it
+                # literally; fall back to the instance start for the builder,
+                # which always emits -start_number.
+                literal = os.path.join(staging, file_list[0])
+                self.log.info("Resolved input (single file): %s", literal)
+                return literal, int(instance.data.get("frameStart", 0))
+
+            numbered.sort(key=lambda t: t[1])
+            first, start_frame = numbered[0]
+            # ``render_v001.1001.exr`` (frame=1001) -> ``render_v001.%04d.exr``
+            m = list(re.finditer(r"\d+", first))[-1]
+            pattern = os.path.join(
+                staging,
+                f"{first[:m.start()]}%0{len(m.group())}d{first[m.end():]}",
+            )
             self.log.info(
                 "Resolved input pattern: %s (start_frame=%s)",
-                pattern, frame_start,
+                pattern, start_frame,
             )
-            return pattern, frame_start
+            return pattern, start_frame
 
         self.log.warning(
             "Could not resolve input path for ffmpeg review, skipping"

@@ -17,9 +17,6 @@ HORNET_MODULES = [
     "custom_write_node",
     "clear_rendered",
     "frame_setting_for_read_nodes",
-    "jesse_send",
-    "minimal_sequence_factory",
-    "nuke_loader",
 ]
 
 # Quick Write callbacks whose registrations we manage, so a reload can rebind

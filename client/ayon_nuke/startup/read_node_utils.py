@@ -35,6 +35,16 @@ SINGLE_FILE_FORMATS = [
 def evaluate_filepath_new(
     k_value, k_eval, project_dir, first_frame, allow_relative
 ):
+    """Resolve a write node's file path to a readable sequence on disk.
+
+    Takes the raw and evaluated `file` knob values plus the project dir and
+    works out an existing path, converts image sequences to hash (####)
+    notation, optionally re-relativises it to the project dir, and scans the
+    folder for the actual first/last frames present.
+
+    Returns (filepath, firstframe, lastframe), or None if nothing has been
+    rendered yet (so a Read can't be built).
+    """
     # get combined relative path
     combined_relative_path = None
     if k_eval is not None and project_dir is not None:
@@ -113,6 +123,13 @@ def evaluate_filepath_new(
 
 
 def create_read_node(ndata, comp_start):
+    """Create a Read node from an `ndata` dict produced by write_to_read.
+
+    Sets file, colorspace, raw, first/last (and origfirst/origlast) and
+    position. When the sequence starts at the comp's first frame it locks
+    frame_mode to 'start at' comp_start, otherwise leaves it at the file's
+    own numbering. Returns the new Read node.
+    """
     nuke.tprint(ndata["filepath"])
     print(ndata["filepath"])
 
@@ -135,7 +152,14 @@ def create_read_node(ndata, comp_start):
 
 
 def write_to_read(write_group_node, allow_relative=False, context=None, xypos=None):
+    """Create a Read node pointing at a Hornet Write group's rendered output.
 
+    Locates the interior write, resolves its rendered path/range via
+    evaluate_filepath_new, and builds a Read positioned just below the group
+    (or at `xypos` / inside `context` if given). Messages "No render found"
+    and aborts if nothing is on disk yet. This backs the "Read From Rendered"
+    button.
+    """
     current_context = nuke.thisNode()
 
     comp_start = nuke.Root().knob("first_frame").value()
@@ -207,8 +231,7 @@ def write_to_read(write_group_node, allow_relative=False, context=None, xypos=No
         read.setXYpos(xypos[0], xypos[1])
 
 def slice_path(path, start, end):
-    # return a re-joined path from a slice of path parts
-
+    """Return a path rebuilt from the [start:end] slice of its components."""
     path = pathlib.Path(path)
     return pathlib.Path(path.parts[start]).joinpath(
         *path.parts[start + 1 : end]
@@ -216,14 +239,22 @@ def slice_path(path, start, end):
 
 
 def get_publish_instance_data(write_node):
-    # parse the json data from the write node
-
+    """Parse and return a write node's publish_instance JSON as a dict
+    (strips the leading 'JSON:::' marker)."""
     return json.loads(
         write_node["publish_instance"].value().replace("JSON:::", "")
     )
 
 
 def assemble_publish_path(ayon_write_node):
+    """Resolve the on-disk publish path for a write node's latest version.
+
+    Builds the path from the project Anatomy publish templates plus the
+    node's product context (product name/type, folder hierarchy, shot),
+    accounting for OVS nodes, single-frame publishes (the '_singleFrame'
+    product suffix) and version-file linkage. Used by the Read From Publish
+    and Navigate to Publish buttons.
+    """
     from ayon_core.pipeline import registered_host, Anatomy
 
     host = registered_host()
@@ -233,8 +264,19 @@ def assemble_publish_path(ayon_write_node):
     directory_template = anatomy.templates["publish"]["render"]["directory"]
     file_template = anatomy.templates["publish"]["render"]["file"]
 
-    root = anatomy.roots["work"].value.rstrip("/")
+    # Normalize to forward slashes: some projects configure the root with
+    # backslashes, which PurePosixPath treats as literal characters and
+    # Nuke's knob evaluation later mangles as escape sequences.
+    root = anatomy.roots["work"].value.replace("\\", "/").rstrip("/")
     project_name = context["project_name"]
+    # Publish file templates on some projects prepend the project code
+    # ("{project[code]}_..."), so the template data must carry it or
+    # format_strict fails with "Missing keys: project".
+    import ayon_api
+    try:
+        project_code = ayon_api.get_project(project_name)["code"]
+    except Exception:
+        project_code = project_name
     hierarchy = pathlib.Path(context["folder_path"].lstrip("/")).parent
     shot = pathlib.Path(context["folder_path"]).name
     product = instance_data["productType"]
@@ -281,11 +323,47 @@ def assemble_publish_path(ayon_write_node):
 
 
 
+    # "Read Latest": prefer the most recent version folder that actually has
+    # a render sequence on disk, over the server-registered latest (which can
+    # be missing on disk, or -- for OVS -- point at a version with no frames).
+    # The published version folder holds the rendered frames (OVS renders into
+    # it directly; regular publishes copy frames in) and the mp4 review is a
+    # different extension, so filtering on the write's file_type reads the
+    # render, never the ffmpeg output. Falls back to the server version when
+    # nothing usable is on disk.
+    extension = ayon_write_node["file_type"].value()
+    if is_ovs:
+        _product_dir = pathlib.Path(
+            directory_template.format_map(
+                {
+                    "root": {"work": root},
+                    "project": {"name": project_name, "code": project_code},
+                    "hierarchy": hierarchy,
+                    "folder": {"name": shot},
+                    "product": {"type": product, "name": name},
+                    "version": 0,
+                }
+            )
+        ).parent
+        if _product_dir.exists():
+            _vdirs = sorted(
+                (e for e in _product_dir.iterdir()
+                 if e.is_dir() and re.match(r"^v\d+$", e.name)),
+                key=lambda p: int(p.name[1:]), reverse=True,
+            )
+            for _vdir in _vdirs:
+                if any(
+                    s.extension == extension
+                    for s in SequenceFactory.from_directory(_vdir, min_frames=1)
+                ):
+                    versions = (int(_vdir.name[1:]), _vdir.name)
+                    break
+
     publish_path = pathlib.Path(
         directory_template.format_map(
             {
                 "root": {"work": root},
-                "project": {"name": project_name},
+                "project": {"name": project_name, "code": project_code},
                 "hierarchy": hierarchy,
                 "folder": {"name": shot},
                 "product": {"type": product, "name": name},
@@ -307,13 +385,12 @@ def assemble_publish_path(ayon_write_node):
     #     log.error(f"Unexpected error: {e}")
     #     return
 
-    extension = ayon_write_node["file_type"].value()
-
     # first_frame = int(ayon_write_node["Render Start"].getValue())
     # last_frame = int(ayon_write_node["Render End"].getValue())
     # pad_count = len(str(last_frame))
 
     file_data = {
+        "project": {"name": project_name, "code": project_code},
         "folder": {"name": shot},
         "product": {"name": name},
         "frame": "%04d",
@@ -449,6 +526,14 @@ def find_review_media(publish_dir):
 
 
 def read_from_publish(ayon_write_node, context = None, xypos = None):
+    """Create a Read (plus any sibling review-media Reads) from a write
+    node's latest published version.
+
+    Resolves the publish path via assemble_publish_path, builds a Read
+    positioned below the write node (or at `xypos` / inside `context`), and
+    additionally reads any published review movies in the same version
+    folder. Backs the Read From Publish button. Returns the main Read node.
+    """
     if (ayon_write_node) is None:
         log.error("ayon_write_node is None")
         nuke.tprint("ayon_write_node is None")
@@ -492,14 +577,6 @@ def read_from_publish(ayon_write_node, context = None, xypos = None):
             log.info(f"Read review media from publish: {movie_path}")
 
         return read_node
-
-
-def get_publish_instance_data(write_node):
-    # parse the json data from the write node
-
-    return json.loads(
-        write_node["publish_instance"].value().replace("JSON:::", "")
-    )
 
 
 def navigate_to_render(write_node):
@@ -556,6 +633,11 @@ def navigate_to_publish(write_node):
 
 
 def filter_write_nodes(nodes):
+    """Return only the Hornet Write groups from `nodes`.
+
+    Keeps Group nodes that carry both the publish_instance data knob and a
+    'submit' button knob (i.e. a fully-built Hornet Write panel).
+    """
     filtered_nodes = [
         n
         for n in nodes
