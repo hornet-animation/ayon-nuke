@@ -887,10 +887,10 @@ def writes_version_sync(write_node, log):
 
         log.debug(f"Overwriting Write path to '{node_new_file}'")
         write_node["file"].setValue(node_new_file)
-        render_dir = os.path.dirname(node_new_file)
-        if not os.path.isdir(render_dir):
-            log.warning(f"Path '{render_dir}' does not exist! Creating it.")
-            os.makedirs(render_dir)
+        # No mkdir here either: this runs on version sync (every script save),
+        # so creating the folder would leave an empty version directory behind
+        # for every save. create_directories on the Write handles it at render
+        # time.
     except Exception:
         log.warning(
             f"Write node: `{write_node.name()}` has no version "
@@ -1209,10 +1209,12 @@ def create_write_node(
         staging_path = pathlib.Path(data["staging_dir"]) / basename
         fpath = staging_path.as_posix()
 
-    # create directory
-    if not os.path.isdir(os.path.dirname(fpath)):
-        log.warning("Path does not exist! I am creating it.")
-        os.makedirs(os.path.dirname(fpath))
+    # Output directory is deliberately NOT created here. Creating it at node
+    # build time litters the tree with empty version folders for nodes that
+    # never render -- which also makes an empty version look like a rendered
+    # one to anything scanning the product directory. The interior Write node
+    # carries create_directories, so Nuke makes the folder when frames are
+    # actually written, locally and on the farm alike.
 
     # GN = nuke.createNode("Group", "name {}".format(name))
     GN = nuke.createNode("Group", "name {}".format(name), inpanel = inpanel)
@@ -1256,8 +1258,11 @@ def create_write_node(
             imageio_writes["knobs"],
             **data
         )
-        # Set create directories on ovs nodes
-        if is_ovs:
+        # Let Nuke create the output directory at render time, for every
+        # Hornet write (not just OVS). This is what makes the removal of the
+        # eager makedirs above safe -- and it does not depend on the
+        # create_directories value coming from imageio settings.
+        if "create_directories" in write_node.knobs():
             write_node["create_directories"].setValue(True)
 
         nuke.tprint(type(write_node))
