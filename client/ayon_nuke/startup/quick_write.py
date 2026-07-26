@@ -27,7 +27,7 @@ log = Logger.get_logger(__name__)
 # Bumped whenever OVS/publish behavior changes, so a live (dev-mode) session
 # can be verified against the source. Printed at module load and echoed by
 # the OVS flows.
-QUICK_WRITE_REV = "ovs-publish-revD"
+QUICK_WRITE_REV = "ovs-publish-revF"
 
 nuke.tprint(
     "[hornet quick_write {}] loaded from: {}".format(
@@ -63,6 +63,114 @@ presets = {
     ],
     "jpeg": [("channels", "rgb")],
 }
+
+
+# ---------------------------------------------------------------------------
+# Quick Write / OVS default settings
+#
+# Layered config, resolved fresh at node creation:
+#     user TOML  overrides  project TOML  overrides  hardcoded fallback
+#
+# menu.py declares the editable hardcoded fallback + the two TOML locations
+# at its top and injects them via configure_defaults() at startup (keeps the
+# knobs to tweak in one obvious place, avoids a menu<->quick_write import
+# cycle). The values below are only used if that injection hasn't run (e.g. a
+# bare module reload). TOML files are re-read on every node create, so editing
+# them takes effect without a Nuke restart; editing menu.py needs a restart.
+# ---------------------------------------------------------------------------
+_QW_DEFAULTS = {
+    "deadlinePriority": 90,
+    "deadlineChunkSize": 1,
+    "concurrentTasks": 1,
+    "deadlinePool": "",          # "" -> the project's primary Deadline pool
+    "deadlineGroup": "nuke",
+    "generate_review_media": True,
+    "burnin": True,
+    "publish_on_farm": False,
+}
+_QW_PROJECT_TOML = "{project_root}/assets/nuke/config/quick_write.toml"
+_QW_USER_TOML = "~/.nuke/quick_write.toml"
+
+
+def configure_defaults(defaults=None, project_toml=None, user_toml=None):
+    """Inject the editable defaults/paths declared at the top of menu.py."""
+    global _QW_DEFAULTS, _QW_PROJECT_TOML, _QW_USER_TOML
+    if defaults:
+        _QW_DEFAULTS = dict(defaults)
+    if project_toml:
+        _QW_PROJECT_TOML = project_toml
+    if user_toml:
+        _QW_USER_TOML = user_toml
+
+
+def _read_toml(path):
+    """Parse a TOML file to a dict; {} if missing/unparseable. Uses stdlib
+    tomllib (3.11+), falling back to tomli, then toml -- all present in the
+    AYON dependency set."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        try:
+            import tomllib as _t
+        except ImportError:
+            import tomli as _t
+        with open(path, "rb") as f:
+            return _t.load(f) or {}
+    except ImportError:
+        try:
+            import toml as _t2
+            with open(path, "r", encoding="utf-8") as f:
+                return _t2.load(f) or {}
+        except Exception as e:
+            log.warning(f"No TOML parser available; ignoring {path} ({e})")
+    except Exception as e:
+        log.warning(f"Could not read defaults TOML {path}: {e}")
+    return {}
+
+
+def _resolve_project_root():
+    """Absolute project directory (anatomy work root + project name), or ''."""
+    try:
+        from ayon_core.pipeline import Anatomy
+        root = Anatomy().roots["work"].value.replace("\\", "/").rstrip("/")
+        return "{}/{}".format(root, os.environ.get("AYON_PROJECT_NAME", ""))
+    except Exception as e:
+        log.warning(f"Could not resolve project root for defaults: {e}")
+        return ""
+
+
+def _merge_toml_over(merged, path):
+    """Layer a TOML file's values (top-level keys and/or a [quick_write]
+    table) over `merged`, in place, for keys we recognise."""
+    data = _read_toml(path)
+    if not isinstance(data, dict):
+        return
+    candidates = {k: v for k, v in data.items() if not isinstance(v, dict)}
+    if isinstance(data.get("quick_write"), dict):
+        candidates.update(data["quick_write"])
+    applied = False
+    for k, v in candidates.items():
+        if k in merged:
+            merged[k] = v
+            applied = True
+    if applied:
+        nuke.tprint(
+            "[hornet quick_write {}] applied defaults from {}".format(
+                QUICK_WRITE_REV, path
+            )
+        )
+
+
+def get_quick_write_defaults():
+    """Resolved defaults dict: hardcoded <- project TOML <- user TOML."""
+    merged = dict(_QW_DEFAULTS)
+    project_toml = os.path.expanduser(
+        _QW_PROJECT_TOML.replace("{project_root}", _resolve_project_root())
+    )
+    user_toml = os.path.expanduser(_QW_USER_TOML)
+    _merge_toml_over(merged, project_toml)   # project first ...
+    _merge_toml_over(merged, user_toml)      # ... user overrides
+    return merged
 
 
 def quick_write_node(family="render"):
@@ -251,6 +359,104 @@ def stamp_addon_version(node):
         display.setValue(_format_version_display(ADDON_VERSION))
 
 
+def restore_file_output_height():
+    """Fix the 'File output' multiline knob collapsing to one line on reload.
+
+    Nuke does not persist the editor height of a Multiline_Eval_String_Knob that
+    was added at runtime (inside embedOptions' knobChanged), so on script load it
+    renders as a single line. A freshly added multiline knob gets its normal
+    multi-line height, so we rebuild just that knob in place: remove everything
+    from 'File output' to the end of the panel and re-add it, recreating only the
+    multiline knob fresh while re-adding the rest as-is (values and order kept).
+
+    Registered as an onCreate handler; a no-op on nodes without the panel.
+    """
+    group = nuke.thisNode()
+    if group is None or "publish_instance" not in group.knobs():
+        return
+
+    knobs = group.allKnobs()
+    names = [k.name() for k in knobs]
+    target = "File output"
+    if target not in names:
+        # Panel not built yet (e.g. onCreate during initial creation) -- nothing
+        # to restore; embedOptions will build it at proper height.
+        return
+
+    tail = knobs[names.index(target):]
+    for knob in tail:
+        group.removeKnob(knob)
+    for knob in tail:
+        if knob.name() == target:
+            fresh = nuke.Multiline_Eval_String_Knob(target)
+            fresh.setValue(knob.value())
+            group.addKnob(fresh)
+        else:
+            group.addKnob(knob)
+
+
+# Knob names whose values must survive a file_type change. embedOptions purges
+# and rebuilds the whole panel on every file_type change, re-seeding these from
+# defaults/root; we snapshot them before the purge and restore them after, so a
+# user's frame range, publish range, Deadline params and publish toggles are
+# kept. Format-specific knobs (extension + per-format Link_Knobs) are excluded
+# on purpose so they still follow the chosen format.
+_PRESERVE_ACROSS_FILETYPE = (
+    "first", "last", "framelist",
+    "publishFirst", "publishLast", "usePublishRange",
+    "deadlinePriority", "deadlineChunkSize", "concurrentTasks",
+    "deadlinePool", "deadlineGroup",
+    "publish_on_farm", "generate_review_media", "burnin",
+)
+
+# Snapshots taken in embedOptions (before the purge) keyed by group full name,
+# so the second rebuild callback (embed_quick_publish, which owns the toggles)
+# can restore them after it runs.
+_EMBED_PRESERVE = {}
+
+
+def _snapshot_settings(group):
+    """Capture format-independent user settings before a file_type rebuild.
+
+    Returns {knob_name: value} for the _PRESERVE_ACROSS_FILETYPE knobs that
+    currently exist on `group` (empty on a node's first build). Lets a
+    file_type change keep frame range, publish range, Deadline params and the
+    publish toggles instead of resetting them to defaults.
+    """
+    snap = {}
+    for name in _PRESERVE_ACROSS_FILETYPE:
+        k = group.knob(name)
+        if k is None:
+            continue
+        try:
+            snap[name] = k.value()
+        except Exception:
+            pass
+    return snap
+
+
+def _restore_settings(group, interior, snap):
+    """Re-apply values captured by _snapshot_settings after the rebuild.
+
+    Render range (first/last) is written to the interior write node -- the
+    group's first/last are Link_Knobs onto it -- everything else to the group.
+    Only names still present are touched, so it is safe to call from either
+    rebuild path and harmless to call more than once.
+    """
+    if not snap:
+        return
+    for name, val in snap.items():
+        try:
+            if name in ("first", "last"):
+                k = interior.knob(name) if interior is not None else None
+            else:
+                k = group.knob(name)
+            if k is not None:
+                k.setValue(val)
+        except Exception:
+            pass
+
+
 def embedOptions():
     nde = nuke.thisNode()
     print(f"nde: {nde.name()}")
@@ -274,6 +480,12 @@ def embedOptions():
 
     if ftype not in knobMatrix.keys():
         return
+
+    # Snapshot user settings before the purge; restored at the end of this
+    # rebuild and (for the toggles) by embed_quick_publish.
+    _preserved = _snapshot_settings(group)
+    _EMBED_PRESERVE[group.fullName()] = _preserved
+
     for knb in group.allKnobs():
         try:
             # never clear or touch the invisible string knob that contains the pipeline JSON data
@@ -413,7 +625,10 @@ def embedOptions():
 
     read_from_publish_button = nuke.PyScript_Knob(
         "readfrompublish",
-        "Read From Publish",
+        # "Read Latest" (newest render on disk) is OVS-only behaviour; the
+        # regular Hornet Write keeps the original "Read From Publish" label
+        # and version-linked lookup.
+        "Read Latest" if is_ovs else "Read From Publish",
         "read_node_utils.read_from_publish(nuke.thisNode())",
     )
 
@@ -450,12 +665,13 @@ def embedOptions():
         "Quick Publish",
         "quick_publish_wrapper(nuke.thisNode())",
     )
-    deadlineChunkSize.setValue(1)
-    concurrentTasks.setValue(2)
-    # deadlinePool.setValue("local")
-    deadlinePool.setValue(get_deadlin_pool())
-    deadlineGroup.setValue("nuke")
-    deadlinePriority.setValue(90)
+    _d = get_quick_write_defaults()
+    deadlineChunkSize.setValue(int(_d["deadlineChunkSize"]))
+    concurrentTasks.setValue(int(_d["concurrentTasks"]))
+    # Empty pool default -> fall back to the project's primary Deadline pool.
+    deadlinePool.setValue(_d["deadlinePool"] or get_deadlin_pool())
+    deadlineGroup.setValue(_d["deadlineGroup"])
+    deadlinePriority.setValue(int(_d["deadlinePriority"]))
 
     usePublishRange.setFlag(nuke.STARTLINE)
     submit_to_deadline.setFlag(nuke.STARTLINE)
@@ -501,7 +717,10 @@ def embedOptions():
     except Exception as e:
         print(f"Error setting views: {e}")
 
-
+    # Restore the settings preserved above (frame/publish range, Deadline
+    # params). The publish toggles are rebuilt by embed_quick_publish, which
+    # restores them from _EMBED_PRESERVE after it runs.
+    _restore_settings(group, nde, _preserved)
 
 
 def show_quick_publish_info():
@@ -556,6 +775,8 @@ def embed_quick_publish():
         nuke.TABBEGINGROUP,
     )
 
+    _d = get_quick_write_defaults()
+
     # Check if this is a prerender node to skip review options
     is_prerender = False
     try:
@@ -571,7 +792,7 @@ def embed_quick_publish():
     publish_on_farm_checkbox = nuke.Boolean_Knob(
         "publish_on_farm", "Publish on Farm"
     )
-    publish_on_farm_checkbox.setValue(False)
+    publish_on_farm_checkbox.setValue(bool(_d["publish_on_farm"]))
     publish_on_farm_checkbox.setTooltip(
         "Run the full publish on the farm, including review media "
         "generation. Unchecked runs the publish (and review extraction) "
@@ -584,7 +805,7 @@ def embed_quick_publish():
         generate_review_checkbox = nuke.Boolean_Knob(
             "generate_review_media", "Generate Review Media"
         )
-        generate_review_checkbox.setValue(True)
+        generate_review_checkbox.setValue(bool(_d["generate_review_media"]))
         generate_review_checkbox.setTooltip(
             "Generate review media (mp4/mov) for the rendered sequence. "
             "Unchecked skips ExtractFFmpegReview entirely."
@@ -594,7 +815,7 @@ def embed_quick_publish():
         burnin_checkbox = nuke.Boolean_Knob(
             "burnin", "Apply burnins to Review"
         )
-        burnin_checkbox.setValue(True)
+        burnin_checkbox.setValue(bool(_d["burnin"]))
         burnin_checkbox.setTooltip(
             "Add burnin information (timecode, frame numbers, etc.) to "
             "review media. Unchecked disables burnins."
@@ -631,6 +852,10 @@ def embed_quick_publish():
     version_display.setValue(_format_version_display(stamped_version))
     version_display.setFlag(nuke.STARTLINE)
     group.addKnob(version_display)
+
+    # Restore the publish toggles (and re-apply the rest, harmlessly) that were
+    # captured before embedOptions purged the panel on this file_type change.
+    _restore_settings(group, nde, _EMBED_PRESERVE.pop(group.fullName(), None))
 
 
 
@@ -983,9 +1208,12 @@ def _find_publishable_ovs_version(path, data):
     check, run only on globbed candidates and soft-failing to the glob
     result), and not already exist as a version on the AYON server.
 
-    Returns (version, path_at_version, skipped) where `skipped` is a list of
-    (version, reason) pairs for reporting; (None, None, skipped) when
-    nothing publishable exists.
+    Returns (version, path_at_version, skipped, already_published). `skipped`
+    is a list of (version, reason) pairs for reporting. `already_published` is
+    the version number that stopped the search because the most recent render
+    on disk is already published (else None) -- we stop there rather than
+    walking back to an older, unpublished render. (None, None, skipped, None)
+    when no render exists on disk at all.
     """
     import re as _re
     version_dir = os.path.dirname(path)
@@ -994,7 +1222,7 @@ def _find_publishable_ovs_version(path, data):
     base_old = os.path.basename(path)
     skipped = []
     if not os.path.isdir(product_dir):
-        return None, None, skipped
+        return None, None, skipped, None
 
     candidates = []
     for entry in os.listdir(product_dir):
@@ -1048,15 +1276,20 @@ def _find_publishable_ovs_version(path, data):
                 pass  # validation is best-effort; trust the glob
         try:
             if _ovs_version_is_published(data, num):
+                # This is the most recent version that actually holds a
+                # render on disk, and it is already published. Stop here
+                # rather than walking further back to an older, unpublished
+                # render -- publishing that would resurrect a superseded
+                # version.
                 skipped.append((num, "already published"))
-                continue
+                return None, None, skipped, num
         except Exception as e:
             log.warning(
                 f"Could not check the server for v{num:03d} ({e}); "
                 f"treating it as unpublished"
             )
-        return num, cand_path, skipped
-    return None, None, skipped
+        return num, cand_path, skipped, None
+    return None, None, skipped, None
 
 
 def _confirm_ovs_publish_version(node):
@@ -1096,7 +1329,9 @@ def _confirm_ovs_publish_version(node):
     except Exception:
         script_version = None
 
-    chosen, chosen_path, skipped = _find_publishable_ovs_version(path, data)
+    chosen, chosen_path, skipped, already_pub = _find_publishable_ovs_version(
+        path, data
+    )
     nuke.tprint(
         "[hornet quick_write {}] OVS search: chose {} | skipped: {}".format(
             QUICK_WRITE_REV,
@@ -1108,6 +1343,13 @@ def _confirm_ovs_publish_version(node):
     )
 
     if chosen is None:
+        if already_pub is not None:
+            nuke.message(
+                "The most recent OVS render (v{:03d}) is already "
+                "published.\n\nNothing to publish -- render a new version "
+                "first.".format(already_pub)
+            )
+            return False
         lines = "\n".join(
             "  v{:03d}: {}".format(num, why) for num, why in skipped
         ) or "  (no version folders found)"

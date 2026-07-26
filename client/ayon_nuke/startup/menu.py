@@ -17,6 +17,35 @@ import json
 import quick_write
 import read_node_utils
 from view_manager import show as show_view_manager
+
+# =====================================================================
+# Quick Write / OVS default settings  (edit here)
+#
+# Precedence when a node is created:
+#     user TOML  >  project TOML  >  QUICK_WRITE_DEFAULTS below
+#
+# The TOML files are read live on every node create (no Nuke restart);
+# editing QUICK_WRITE_DEFAULTS here is the last-resort fallback and needs a
+# restart. "{project_root}" resolves to the AYON work root + project name.
+# Keys must match the panel knob names. deadlinePool "" -> project primary.
+# =====================================================================
+QUICK_WRITE_DEFAULTS = {
+    "deadlinePriority": 90,
+    "deadlineChunkSize": 1,
+    "concurrentTasks": 1,
+    "deadlinePool": "",
+    "deadlineGroup": "nuke",
+    "generate_review_media": True,
+    "burnin": True,
+    "publish_on_farm": False,
+}
+QUICK_WRITE_PROJECT_TOML = "{project_root}/assets/nuke/config/quick_write.toml"
+QUICK_WRITE_USER_TOML = "~/.nuke/quick_write.toml"
+
+quick_write.configure_defaults(
+    QUICK_WRITE_DEFAULTS, QUICK_WRITE_PROJECT_TOML, QUICK_WRITE_USER_TOML
+)
+# =====================================================================
 from quick_write import (
     embedOptions,
     presets,
@@ -272,6 +301,9 @@ nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
 nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
+# Rebuild the 'File output' multiline knob on load so it keeps its full height
+# instead of collapsing to a single line.
+nuke.addOnCreate(quick_write.restore_file_output_height, nodeClass="Group")
 
 
 nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")

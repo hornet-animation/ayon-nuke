@@ -289,6 +289,42 @@ def assemble_publish_path(ayon_write_node):
 
 
 
+    # "Read Latest": prefer the most recent version folder that actually has
+    # a render sequence on disk, over the server-registered latest (which can
+    # be missing on disk, or -- for OVS -- point at a version with no frames).
+    # The published version folder holds the rendered frames (OVS renders into
+    # it directly; regular publishes copy frames in) and the mp4 review is a
+    # different extension, so filtering on the write's file_type reads the
+    # render, never the ffmpeg output. Falls back to the server version when
+    # nothing usable is on disk.
+    extension = ayon_write_node["file_type"].value()
+    if is_ovs:
+        _product_dir = pathlib.Path(
+            directory_template.format_map(
+                {
+                    "root": {"work": root},
+                    "project": {"name": project_name, "code": project_code},
+                    "hierarchy": hierarchy,
+                    "folder": {"name": shot},
+                    "product": {"type": product, "name": name},
+                    "version": 0,
+                }
+            )
+        ).parent
+        if _product_dir.exists():
+            _vdirs = sorted(
+                (e for e in _product_dir.iterdir()
+                 if e.is_dir() and re.match(r"^v\d+$", e.name)),
+                key=lambda p: int(p.name[1:]), reverse=True,
+            )
+            for _vdir in _vdirs:
+                if any(
+                    s.extension == extension
+                    for s in SequenceFactory.from_directory(_vdir, min_frames=1)
+                ):
+                    versions = (int(_vdir.name[1:]), _vdir.name)
+                    break
+
     publish_path = pathlib.Path(
         directory_template.format_map(
             {
@@ -314,8 +350,6 @@ def assemble_publish_path(ayon_write_node):
     #     print(f"Unexpected error: {e}")
     #     log.error(f"Unexpected error: {e}")
     #     return
-
-    extension = ayon_write_node["file_type"].value()
 
     # first_frame = int(ayon_write_node["Render Start"].getValue())
     # last_frame = int(ayon_write_node["Render End"].getValue())
@@ -411,7 +445,32 @@ def assemble_publish_path(ayon_write_node):
     return result
 
 
+def find_review_media(publish_dir):
+    """Return published review movie files in a version folder.
+
+    Looks for single-file movie formats (mov/mp4/...) directly in the version
+    directory, where ExtractFFmpegReview's deliverables are integrated. Returns
+    an empty list if the directory is missing or holds no movies.
+    """
+    if publish_dir is None or not publish_dir.exists():
+        return []
+
+    movies = []
+    for ext in SINGLE_FILE_FORMATS:
+        movies.extend(publish_dir.glob("*.{}".format(ext)))
+
+    return sorted(p.as_posix() for p in movies if p.is_file())
+
+
 def read_from_publish(ayon_write_node, context = None, xypos = None):
+    """Create a Read (plus any sibling review-media Reads) from a write
+    node's latest published version.
+
+    Resolves the publish path via assemble_publish_path, builds a Read
+    positioned below the write node (or at `xypos`), and additionally reads
+    any published review movies in the same version folder. Backs the
+    Read From Publish / Read Latest button. Returns the main Read node.
+    """
     if (ayon_write_node) is None:
         log.error("ayon_write_node is None")
         nuke.tprint("ayon_write_node is None")
@@ -440,6 +499,20 @@ def read_from_publish(ayon_write_node, context = None, xypos = None):
                 int(ayon_write_node["xpos"].getValue()),
                 int(ayon_write_node["ypos"].getValue()) + 60,
             )
+
+        # Also pull in any published review media that sits in the same version
+        # folder. fromUserText lets Nuke discover the movie's frame range, so we
+        # don't set first/last ourselves.
+        review_xpos = read_node.xpos()
+        review_ypos = read_node.ypos()
+        for offset, movie_path in enumerate(
+            find_review_media(ppath.parent), start=1
+        ):
+            review_read = nuke.nodes.Read()
+            review_read["file"].fromUserText(movie_path)
+            review_read.setXYpos(review_xpos + offset * 100, review_ypos)
+            log.info(f"Read review media from publish: {movie_path}")
+
         return read_node
 
 
