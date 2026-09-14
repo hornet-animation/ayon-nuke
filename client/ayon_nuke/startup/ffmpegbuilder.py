@@ -33,12 +33,6 @@ DELIVERY_TAGS = {
     "linear":      (1,  8, 1),   # bt709    / linear        / bt709
 }
 
-# Codec + delivery combinations that use full-range YUV. ProRes / DNxHD are
-# always tv-range; libx264 etc. can encode full-range, which sRGB / linear
-# deliveries want so blacks aren't crushed into 16-235.
-_FLEX_RANGE_CODECS = {"libx264", "libx265", "libsvtav1", "mjpeg"}
-_PC_RANGE_DELIVERIES = {"srgb", "linear"}
-
 # Each *_metadata bitstream filter rewrites the codec's own VUI / frame
 # header post-encode, which is what players actually trust for colour.
 # Container ``colr`` / ``nclc`` atoms alone are unreliable: libx264/x265
@@ -49,6 +43,20 @@ _METADATA_BSF = {
     "libx265":   "hevc_metadata",
     "prores_ks": "prores_metadata",
 }
+
+# A review platform (SyncSketch, YouTube, Vimeo, Frame.io) reads the in-band
+# VUI/frame-header field, not the container colr atom, and "corrects" any
+# file whose in-band field isn't Rec.709 -- for a true sRGB-piecewise encode
+# that correction is an unwanted re-grade (measured as dark/crushed playback
+# on SyncSketch, and as an outright re-encode on YouTube/Vimeo in the
+# srgb-transcoder project's tests, issues #5/#6/#10/#11). So for these
+# deliveries the container states the real sRGB tag (for QuickTime-lineage
+# players) while the in-band field states BT.709 primaries/matrix with the
+# transfer left "unspecified" (H.273 code 2), so the platform passes the
+# picture through untouched.
+_INBAND_SILENT_DELIVERIES = {"srgb"}
+_UNSPECIFIED_TRANSFER = 2
+_BT709 = 1
 
 
 # (codec_config key, ffmpeg flag, allow_zero).
@@ -304,21 +312,17 @@ class FFMpegBuilder:
 
         # Delivery container tags (range/primaries/trc/matrix). Emitted before
         # extra_args so a profile can still override any of them explicitly.
-        # Range is derived from codec + delivery: ProRes / DNxHD stay tv-range,
-        # h264/h265/AV1 use full range for sRGB / linear deliveries so blacks
-        # aren't crushed. The bitstream filter rewrites the codec's own VUI /
-        # frame header so players that ignore the container ``colr`` atom
-        # still see the right tags.
+        # Range is always tv (limited): encoding full-range and trusting a
+        # player to honour -color_range/video_full_range_flag crushed blacks
+        # on real playback instead (verified dark/contrasty SyncSketch review
+        # on PC) -- tv-range is what the validated srgb-transcoder recipe uses
+        # unconditionally, for every codec and delivery.
         delivery = self._delivery
         tags = DELIVERY_TAGS.get(delivery) if delivery and delivery != "none" else None
         if tags:
             p, t, m = tags
-            use_pc = (
-                enc.get("codec") in _FLEX_RANGE_CODECS
-                and delivery in _PC_RANGE_DELIVERIES
-            )
             cmd.extend([
-                "-color_range", "pc" if use_pc else "tv",
+                "-color_range", "tv",
                 "-color_primaries", str(p),
                 "-color_trc", str(t),
                 "-colorspace", str(m),
@@ -332,11 +336,15 @@ class FFMpegBuilder:
                     f"prores_metadata=color_primaries={p}:color_trc={t}"
                 ])
             elif bsf:
+                silent = delivery in _INBAND_SILENT_DELIVERIES
+                inband_p = _BT709 if silent else p
+                inband_t = _UNSPECIFIED_TRANSFER if silent else t
+                inband_m = _BT709 if silent else m
                 cmd.extend(["-bsf:v",
-                    f"{bsf}=video_full_range_flag={1 if use_pc else 0}"
-                    f":colour_primaries={p}"
-                    f":transfer_characteristics={t}"
-                    f":matrix_coefficients={m}"
+                    f"{bsf}=video_full_range_flag=0"
+                    f":colour_primaries={inband_p}"
+                    f":transfer_characteristics={inband_t}"
+                    f":matrix_coefficients={inband_m}"
                 ])
 
         if framerate:
