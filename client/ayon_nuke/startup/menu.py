@@ -315,6 +315,90 @@ nuke.menu("Nuke").addCommand(
 )
 
 
+# =====================================================================
+# Non-production environment marker
+#
+# A small label pinned to the right-hand end of the menu bar naming the AYON
+# environment, so it is obvious which bundle a session came from. Deliberately
+# understated -- dimmer than the menu text, no fill, no border -- so it reads
+# when looked for and stays out of the way otherwise. Production sessions get
+# nothing, so the marker only ever appears where you should notice.
+#
+# Qt reserves the menu bar's corner slot, so position does not depend on menu
+# registration order (an empty top-level menu landed mid-bar instead). It has
+# to run once the main window exists, hence the deferral below.
+#
+# AYON_USE_DEV / AYON_USE_STAGING are set by the launcher; they are the same
+# variables build_request() forwards to Deadline. Dev wins if both are set.
+# =====================================================================
+ENVIRONMENT_MARKERS = {
+    "AYON_USE_DEV": "dev",
+    "AYON_USE_STAGING": "staging",
+}
+
+MARKER_STYLE = (
+    "background:transparent; color:#63c774;"
+    "padding:2px 10px; margin:2px 8px; border-radius:3px;"
+)
+
+
+def _ayon_env_flag(name):
+    """True when an AYON boolean env var is set to a truthy value."""
+    return os.environ.get(name, "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def add_environment_marker():
+    """Pin a subtle 'dev' / 'staging' label to the end of the menu bar."""
+    text = next(
+        (
+            marker_text
+            for env_var, marker_text in ENVIRONMENT_MARKERS.items()
+            if _ayon_env_flag(env_var)
+        ),
+        None,
+    )
+    if text is None:
+        return
+
+    from qtpy import QtWidgets, QtCore
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+
+    # The real main window is the only QMainWindow whose menu bar already has
+    # actions on it (File, Edit, ...).
+    window = next(
+        (
+            w for w in app.topLevelWidgets()
+            if isinstance(w, QtWidgets.QMainWindow)
+            and w.menuBar() is not None
+            and w.menuBar().actions()
+        ),
+        None,
+    )
+    if window is None:
+        log.warning("Environment marker: Nuke main window not found")
+        return
+
+    tag = QtWidgets.QLabel(text)
+    tag.setStyleSheet(MARKER_STYLE)
+    window.menuBar().setCornerWidget(tag, QtCore.Qt.TopRightCorner)
+    tag.show()
+    log.info(f"AYON environment marker: {text}")
+
+
+# Deferred so the main window exists by the time we look for it.
+try:
+    import nukescripts
+
+    nukescripts.executeDeferred(add_environment_marker)
+except Exception as _marker_exc:
+    log.warning(f"Environment marker not shown: {_marker_exc}")
+
+
 # This code gets only called from GUI mode.
 # Unlike the non-GUI mode (e.g. farm),
 # we do expect a valid host at this time.
