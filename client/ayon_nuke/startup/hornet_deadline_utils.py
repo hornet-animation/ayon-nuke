@@ -238,6 +238,8 @@ def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None, ove
     if node is None:
         raise Exception("Node provided to submitter None")
 
+    _assert_no_local_reads()
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
     temp_script_path = "{path}/submission/{name}_{time}.nk".format(
         path=os.environ["AYON_WORKDIR"],
@@ -327,6 +329,53 @@ def _rez_extra_info_pairs():
             tools.append(required)
     pairs.append(("DEADLINE_REZ_TOOLS", " ".join(tools)))
     return pairs
+
+
+# Drive letters Deadline workers cannot see. Hard guard for every submission
+# path (on-node, batch tool, views_write); quick_write runs a friendlier,
+# configurable version of the same check before reaching here.
+LOCAL_DRIVES = ("C",)
+
+
+def _local_read_paths():
+    """[(node full name, path)] for Read/DeepRead nodes on a local drive."""
+    import ntpath
+
+    hits = []
+    for read in nuke.allNodes("Read", recurseGroups=True) + nuke.allNodes(
+        "DeepRead", recurseGroups=True
+    ):
+        for knob_name in ("file", "proxy"):
+            knob = read.knob(knob_name)
+            if knob is None:
+                continue
+            candidates = [knob.value() or ""]
+            try:
+                candidates.append(knob.evaluate() or "")
+            except Exception:
+                pass
+            for path in candidates:
+                drive, _ = ntpath.splitdrive(path.strip())
+                if len(drive) == 2 and drive[1] == ":" and drive[0].upper() in LOCAL_DRIVES:
+                    hits.append((read.fullName(), path))
+                    break
+            else:
+                continue
+            break
+    return hits
+
+
+def _assert_no_local_reads():
+    """Raise if any Read references a local drive -- the farm would fail."""
+    hits = _local_read_paths()
+    if hits:
+        raise RuntimeError(
+            "Refusing to submit: {} Read node(s) reference a local drive the "
+            "farm cannot see: {}".format(
+                len(hits),
+                "; ".join("{} -> {}".format(n, p) for n, p in hits),
+            )
+        )
 
 
 def _task_timeout_job_info(knobValues):

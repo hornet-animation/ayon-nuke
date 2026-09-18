@@ -118,6 +118,10 @@ _QW_DEFAULTS = {
     "deadlineTaskTimeout": 0,
     # Channels new Hornet PreWrite nodes start with ("" = leave Nuke's default).
     "prerender_channels": "rgba",
+    # Drive letters the farm cannot see. Any Read/DeepRead whose file (or
+    # proxy) path lives on one of these blocks farm submission outright.
+    # Comma/space separated letters; "" disables the check.
+    "forbidden_read_drives": "C",
     # Warn before rendering/submitting a write set to more than rgba (e.g.
     # "all"). The warning's "don't warn me again" writes this False to the
     # user TOML; re-enable via Quick Write Defaults.
@@ -321,11 +325,13 @@ def _confirm_extra_channels(node):
         return True
 
     panel = nukescripts.PythonPanel("Extra Channels")
+    what = "ALL" if selection.strip() == "all" else "extra"
     panel.addKnob(nuke.Text_Knob(
         "msg", "",
-        "<b>'{}'</b> is set to write <b>{}</b> -- more than rgba.<br><br>"
-        "Extra layers make bigger, slower files and are usually unintended."
-        "<br><br>OK renders anyway; Cancel aborts.".format(node.name(), selection),
+        "<b>Rendering {} channels! Is this what you want?</b><br><br>"
+        "<font color='#808080'>{}  channels: {}</font>".format(
+            what, node.name(), selection
+        ),
     ))
     suppress = nuke.Boolean_Knob("suppress", "Don't warn me again (this user)")
     suppress.setFlag(nuke.STARTLINE)
@@ -343,6 +349,88 @@ def _confirm_extra_channels(node):
         except Exception as exc:
             log.warning(f"Could not persist warn_extra_channels=false: {exc}")
     return bool(proceed)
+
+
+def _forbidden_read_drives():
+    """Upper-case drive letters from the "forbidden_read_drives" default."""
+    try:
+        raw = str(get_quick_write_defaults().get("forbidden_read_drives") or "")
+    except Exception:
+        raw = "C"
+    return {
+        part.strip().rstrip(":").upper()
+        for part in raw.replace(",", " ").split()
+        if part.strip()
+    }
+
+
+def _local_read_nodes(drives=None):
+    """Read/DeepRead nodes (anywhere in the script) whose file or proxy path
+    sits on a forbidden drive letter. Returns [(node, offending_path), ...].
+
+    Checks both the raw knob value and its evaluation (TCL/expressions), so a
+    path built at runtime is caught too. ntpath.splitdrive handles either
+    slash style and ignores UNC paths, which have no drive letter.
+    """
+    import ntpath
+
+    drives = _forbidden_read_drives() if drives is None else drives
+    if not drives:
+        return []
+    offenders = []
+    for read in nuke.allNodes("Read", recurseGroups=True) + nuke.allNodes(
+        "DeepRead", recurseGroups=True
+    ):
+        for knob_name in ("file", "proxy"):
+            knob = read.knob(knob_name)
+            if knob is None:
+                continue
+            candidates = [knob.value() or ""]
+            try:
+                candidates.append(knob.evaluate() or "")
+            except Exception:
+                pass
+            hit = None
+            for path in candidates:
+                drive, _ = ntpath.splitdrive(path.strip())
+                if len(drive) == 2 and drive[1] == ":" and drive[0].upper() in drives:
+                    hit = path
+                    break
+            if hit:
+                offenders.append((read, hit))
+                break
+    return offenders
+
+
+def _confirm_no_local_reads(node):
+    """Farm-submit gate: refuse when any Read points at a local drive.
+
+    The farm cannot see C:, so such a job fails on every task. Lists the
+    offending nodes, selects them in the DAG for easy fixing, and returns
+    False. Local renders are unaffected (checked only on the farm path).
+    """
+    offenders = _local_read_nodes()
+    if not offenders:
+        return True
+    drives = ", ".join(sorted(d + ":" for d in _forbidden_read_drives()))
+    lines = "\n".join(
+        "  {}  ->  {}".format(read.fullName(), path) for read, path in offenders
+    )
+    try:
+        for n in nuke.selectedNodes():
+            n.setSelected(False)
+        for read, _ in offenders:
+            read.setSelected(True)
+    except Exception:
+        pass
+    nuke.message(
+        "Cannot submit '{}': {} Read node(s) reference a local drive ({}) "
+        "that the farm cannot see.\n\n{}\n\nThey are now selected in the "
+        "node graph. Repath them to the network and submit again.".format(
+            node.name(), len(offenders), drives, lines
+        )
+    )
+    return False
 
 
 def _resolved_toml_paths():
@@ -1742,6 +1830,11 @@ def render_or_submit(node, local=False):
         # knobs. Otherwise show the one-shot settings dialog and pass its values
         # through as overrides (not written back to the node), so the priority
         # clamp can't clobber them and nothing persists past this submit.
+        # Farm workers cannot see local drives; refuse rather than submit a
+        # job that fails on every task.
+        if not _confirm_no_local_reads(node):
+            print("Submission cancelled: Read node(s) on a local drive")
+            return
         skip = node.knob("skip_popup")
         if skip is not None and skip.value():
             # No popup -> the timeout still applies, from the TOML default.
@@ -1864,7 +1957,14 @@ def _padded_obsolete_icon(node):
     if width <= 0:
         return None
     pad = width + _OBSOLETE_ICON_GAP
-    out = "{}/obsolete_pad{}.png".format(_OBSOLETE_ICON_CACHE, pad)
+    # Key the cache on the asset's mtime too, so a regenerated obsolete.png
+    # (new orientation, size, colour) invalidates padded copies made from
+    # the old one instead of being served stale.
+    try:
+        stamp = int(os.path.getmtime(OBSOLETE_ICON))
+    except OSError:
+        stamp = 0
+    out = "{}/obsolete_pad{}_{}.png".format(_OBSOLETE_ICON_CACHE, pad, stamp)
     if os.path.isfile(out):
         return out
     try:
@@ -2130,14 +2230,14 @@ def get_latest_publish_version(node):
 
 
 def _update_publish_header_version(node):
-    """Sync the grey 'current version' readout in the Publish header text to
+    """Sync the teal 'current publish' readout in the Publish header text to
     the 'publish_version' int (which lives on the Info tab)."""
     header = node.knob("publish_header")
     version_knob = node.knob("publish_version")
     if header is None or version_knob is None:
         return
     header.setValue(
-        "<b>Publish</b>&nbsp;&nbsp;&nbsp;<font color='#808080'>"
+        "<b>Publish</b>&nbsp;&nbsp;&nbsp;<font color='#3fb8b0'>"
         "current publish v{:03d}</font>".format(int(version_knob.value()))
     )
 

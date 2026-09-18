@@ -36,6 +36,7 @@ QUICK_WRITE_DEFAULTS = {
     "deadlineTaskTimeout": 0,   # minutes; 0 = none (submit popup only). Timed-out tasks error and requeue
     "prerender_channels": "rgba",   # channels new PreWrite nodes start with; "" = Nuke default
     "warn_extra_channels": True,    # warn before rendering more than rgba; the popup can turn it off per user
+    "forbidden_read_drives": "C",   # Reads on these drive letters block farm submission; "" disables
     "deadlinePool": "",
     "deadlineGroup": "nuke",
     "generate_review_media": True,
@@ -160,6 +161,10 @@ def warnSingleFrame():
     nde = nuke.thisNode()
     knb = nuke.thisKnob()
     group = nde.parent()
+    # Hornet groups only: a plain Write inside any other group (or at root)
+    # must not get warning knobs bolted onto its parent.
+    if group is None or "publish_instance" not in group.knobs():
+        return
     if knb.name() == "first" or knb.name() == "last":
         if not knb.value():
             return
@@ -254,6 +259,9 @@ def enable_disable_frame_range():
     if not nde.knob("use_limit") or not knb.name() == "use_limit":
         return
     group = nuke.toNode(".".join(["root"] + nde.fullName().split(".")[:-1]))
+    # Hornet groups only; other parents have no first/last knobs to toggle.
+    if group is None or "publish_instance" not in group.knobs():
+        return
     enable = nde.knob("use_limit").value()
     group.knobs()["first"].setEnabled(enable)
     group.knobs()["last"].setEnabled(enable)
