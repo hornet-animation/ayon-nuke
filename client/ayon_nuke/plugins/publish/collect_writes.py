@@ -388,7 +388,12 @@ class CollectNukeWrites(
         )
 
         if len(collected_frames) == 1:
-            representation["files"] = collected_frames.pop()
+            # Index, don't pop(): this is the same list object that
+            # _set_existing_files_data returns to _set_expected_files. pop()
+            # mutated it to empty for single-frame publishes, leaving
+            # expectedFiles == [] -> farm fell back to a workfile render and
+            # iter_expected_files crashed on the empty list.
+            representation["files"] = collected_frames[0]
         else:
             representation["files"] = collected_frames
 
