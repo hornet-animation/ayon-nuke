@@ -27,16 +27,19 @@ import read_node_utils
 # editing QUICK_WRITE_DEFAULTS here is the last-resort fallback and needs a
 # restart. "{project_root}" resolves to the AYON work root + project name.
 # Keys must match the panel knob names. deadlinePool "" -> project primary.
+# Edit these in-app via Hornet Write > Quick Write Defaults... (writes the TOML).
 # =====================================================================
 QUICK_WRITE_DEFAULTS = {
     "deadlinePriority": 90,
     "deadlineChunkSize": 1,
     "concurrentTasks": 1,
+    "deadlineTaskTimeout": 0,   # minutes; 0 = none. Timed-out tasks error and requeue
     "deadlinePool": "",
     "deadlineGroup": "nuke",
     "generate_review_media": True,
     "burnin": True,
     "publish_on_farm": False,
+    "compression": "DWAA",   # EXR compression; prefix-matched ("DWAA", "PIZ", "Zip"); "" = leave Nuke's default
 }
 QUICK_WRITE_PROJECT_TOML = "{project_root}/assets/nuke/config/quick_write.toml"
 QUICK_WRITE_USER_TOML = "~/.nuke/quick_write.toml"
@@ -45,17 +48,21 @@ quick_write.configure_defaults(
     QUICK_WRITE_DEFAULTS, QUICK_WRITE_PROJECT_TOML, QUICK_WRITE_USER_TOML
 )
 # =====================================================================
+
 from quick_write import (
     embedOptions,
     presets,
-    embed_quick_publish,
-    show_quick_publish_info,
     quick_publish_wrapper,
     quick_write_node,
     ovs_write_node,
     update_ovs_write_version,
     _quick_write_node,
     render_or_submit,
+    on_priority_clamp,
+    set_ranges_to_globals,
+    match_publish_to_render,
+    refresh_latest_publish_display,
+    locate_obsolete_nodes,
 )
 from hornet_deadline_utils import deadlineNetworkSubmit
 from hornet_publish_utils import quick_publish
@@ -73,7 +80,7 @@ import ayon_api
 import hornet_deadline_utils
 import file_sequence
 import views_write
-from reload_hornet import reload_hornet_modules
+from reload_hornet import reload_hornet_modules, register_quick_write_callbacks
 
 from ayon_core.pipeline import registered_host
 # Version Up Workfile import
@@ -271,27 +278,51 @@ def enable_publish_range():
 
 hornet_menu = nuke.menu("Nuke")
 m = hornet_menu.addMenu("&Hornet Write")
-m.addCommand("&Quick Write Node", "quick_write_node()", "Ctrl+W")
+m.addCommand("&Hornet Write Node", "quick_write_node()", "Ctrl+W")
 m.addCommand(
-    "&Quick PreWrite Node",
+    "&Hornet PreWrite Node",
     "quick_write_node(family='prerender')",
     "Ctrl+Shift+W",
 )
 m.addCommand(
-    "&Quick Single Frame Write Node",
+    "&Hornet Single Frame Write Node",
     "quick_write_node(family='image')"
 )
 m.addCommand("&Oversized Write Node", "ovs_write_node()")
 m.addCommand(
-        "Views Write Node",
-        "views_write.views_write_node(_quick_write_node)",
-        tooltip="Create a views write node that generates write nodes for all views",
+    "Quick Write Defaults...",
+    "quick_write.configure_quick_write_defaults_ui()",
+    tooltip="Edit the TOML-layered defaults new Hornet Write nodes pick up "
+            "(project-wide or just this user)",
+)
+# Views Write Node temporarily disabled -- migrating to another package.
+# Keep the code/registration here for now; just don't expose the menu entry.
+# m.addCommand(
+#         "Views Write Node",
+#         "views_write.views_write_node(_quick_write_node)",
+#         tooltip="Create a views write node that generates write nodes for all views",
+# )
+m.addCommand(
+        "Locate Obsolete Write Nodes",
+        "locate_obsolete_nodes()",
+        tooltip="Highlight AYON write nodes whose stamped addon version is out of date",
+)
+m.addCommand(
+        "Adopt Current Shot",
+        "quick_write.adopt_current_shot_selected()",
+        tooltip="Adopt the selected Hornet Write node(s) -- or all foreign "
+                "ones, if none are selected -- to the current shot/task",
+)
+m.addCommand(
+        "Read From Rendered",
+        "quick_write.read_from_rendered_selected()",
+        "alt+r",
+        shortcutContext=2,  # DAG/node-graph only
+        tooltip="Read From Rendered on the selected Hornet Write node(s)",
 )
 
 nuke.addKnobChanged(apply_format_presets, nodeClass="Write")
 nuke.addKnobChanged(switchExtension, nodeClass="Write")
-nuke.addKnobChanged(embedOptions, nodeClass="Write")
-nuke.addKnobChanged(embed_quick_publish, nodeClass="Write")
 nuke.addKnobChanged(enable_publish_range, nodeClass="Group")
 nuke.addKnobChanged(warnSingleFrame, nodeClass="Write")
 nuke.addKnobChanged(enable_disable_frame_range, nodeClass="Write")
@@ -300,13 +331,15 @@ nuke.addOnScriptSave(writes_ver_sync)
 nuke.addOnScriptLoad(WorkfileSettings().set_colorspace)
 nuke.addOnCreate(WorkfileSettings().set_colorspace, nodeClass="Root")
 nuke.addOnCreate(set_blank_workfile_frame_range, nodeClass="Root")
-# Rebuild the 'File output' multiline knob on load so it keeps its full height
-# instead of collapsing to a single line.
-nuke.addOnCreate(quick_write.restore_file_output_height, nodeClass="Group")
 
+# Views Write Node temporarily disabled -- migrating to another package.
+# nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
 
-nuke.addKnobChanged(quick_write.refresh_deadline_callback, nodeClass="Group")
-nuke.addKnobChanged(views_write.sanitize_aspect, nodeClass="Group")
+# Quick Write callbacks (embedOptions, priority clamp, auto-match, multiline-
+# height restore, obsolete-on-load, deadline pool refresh) are registered
+# through reload_hornet so reload_hornet_modules() can rebind them to reloaded
+# code without stacking duplicates.
+register_quick_write_callbacks()
 
 nuke.menu("Nuke").addCommand(
     "File/Version Up Workfile",

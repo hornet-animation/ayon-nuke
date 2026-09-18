@@ -58,7 +58,7 @@ class CollectSyncWorkfileVersion(pyblish.api.InstancePlugin):
         """
         try:
             node = instance.data["transientData"]["node"]
-            knob = node.knob("File output") or node.knob("file")
+            knob = node.knob("file") or node.knob("File output")
             path = (knob.value() or "").replace("\\", "/")
             if not path:
                 return None
