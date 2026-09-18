@@ -181,7 +181,6 @@ def getNodeSubmissionInfo(node):
         "deadlinePriority",
         "deadlineChunkSize",
         "concurrentTasks",
-        "deadlineTaskTimeout",
         "renderInterval",
         "framelist"
     ]

@@ -33,7 +33,9 @@ QUICK_WRITE_DEFAULTS = {
     "deadlinePriority": 90,
     "deadlineChunkSize": 1,
     "concurrentTasks": 1,
-    "deadlineTaskTimeout": 0,   # minutes; 0 = none. Timed-out tasks error and requeue
+    "deadlineTaskTimeout": 0,   # minutes; 0 = none (submit popup only). Timed-out tasks error and requeue
+    "prerender_channels": "rgba",   # channels new PreWrite nodes start with; "" = Nuke default
+    "warn_extra_channels": True,    # warn before rendering more than rgba; the popup can turn it off per user
     "deadlinePool": "",
     "deadlineGroup": "nuke",
     "generate_review_media": True,
@@ -222,21 +224,25 @@ def switchExtension():
 
 
 def check_and_show_publisher():
-    # this is supposed to check if there's already a publish to save the user
-    # from submitting one that fails, but the assemble_publish_path() function
-    # doest not currently take version into account and just returns the latest
-    # which causes this to return false positive.
+    """Publish button: warn up front if the target version already exists.
 
-    # Leaving it here because it's on the list to make a btter pubklish bath
-    # solver, at which point this function will work.
-
-    # publish_path = read_node_utils.assemble_publish_path(nuke.thisNode())
-
-    # if publish_path:
-    #     base = publish_path.name.split(".")[0]
-    #     if publish_path.parent.glob(f"{base}.*"):
-    #         if not nuke.ask("Files exist in publish location. Conitue?"):
-    #             return
+    On linked-version setups the publish targets the workfile version, so
+    re-publishing an existing version fails cryptically inside pyblish. Ask
+    here instead, before the Publisher opens. OVS nodes resolve their own
+    version and are skipped. Fails open (the Publisher still opens).
+    """
+    node = nuke.thisNode()
+    try:
+        is_ovs = bool(quick_write.parse_publish_instance(node).get("is_ovs"))
+    except Exception:
+        is_ovs = False
+    if not is_ovs:
+        try:
+            if not quick_write._confirm_publish_version(node):
+                print("Publish cancelled: target version already exists")
+                return
+        except Exception as exc:
+            log.warning(f"Publish version pre-check skipped: {exc}")
 
     host_tools.show_publisher(tab="Publish")
 

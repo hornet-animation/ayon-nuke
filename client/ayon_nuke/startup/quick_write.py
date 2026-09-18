@@ -64,7 +64,8 @@ ADOPTED_TILE_COLOR = 0xCC0000FF  # red: node was adopted, needs a re-render
 
 # dict mapping extension to list of exposed parameters from write node to top level group node
 knobMatrix = {
-    "exr": ["autocrop", "datatype", "heroview", "metadata", "interleave"],
+    "exr": ["compression", "autocrop", "datatype", "heroview", "metadata",
+            "interleave"],
     "png": ["datatype"],
     "dpx": ["datatype"],
     "tiff": ["datatype", "compression"],
@@ -111,8 +112,16 @@ _QW_DEFAULTS = {
     "concurrentTasks": 1,
     # Deadline task timeout in minutes; 0 = none. A task still running past it
     # is errored (OnTaskTimeout=Error), which Deadline then requeues, so a hung
-    # frame gets picked up again instead of holding a worker forever.
+    # frame gets picked up again instead of holding a worker forever. Lives in
+    # the submit popup only (no node knob); this is the popup's starting value
+    # and what skip-popup submits use.
     "deadlineTaskTimeout": 0,
+    # Channels new Hornet PreWrite nodes start with ("" = leave Nuke's default).
+    "prerender_channels": "rgba",
+    # Warn before rendering/submitting a write set to more than rgba (e.g.
+    # "all"). The warning's "don't warn me again" writes this False to the
+    # user TOML; re-enable via Quick Write Defaults.
+    "warn_extra_channels": True,
     "deadlinePool": "",          # "" -> the project's primary Deadline pool
     "deadlineGroup": "nuke",
     "generate_review_media": True,
@@ -239,6 +248,101 @@ def _apply_default_compression(interior, ftype):
         return
     if knob.value() != target:
         knob.setValue(target)
+
+
+def _default_task_timeout():
+    """Deadline task timeout (minutes) from the TOML-layered defaults; 0 = none."""
+    try:
+        return max(0, int(get_quick_write_defaults().get("deadlineTaskTimeout") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _apply_prerender_channels(write):
+    """Set a new PreWrite's interior Write channels to the configured default
+    ("prerender_channels", e.g. "rgba"; "" leaves Nuke's default)."""
+    try:
+        wanted = str(get_quick_write_defaults().get("prerender_channels") or "").strip()
+    except Exception:
+        return
+    if not wanted or write is None:
+        return
+    knob = write.knob("channels")
+    if knob is None:
+        return
+    try:
+        knob.setValue(wanted)
+    except Exception as exc:
+        log.warning(f"Could not set prerender channels to '{wanted}': {exc}")
+
+
+def _channels_beyond_rgba(selection):
+    """True when a Write 'channels' selection outputs more than rgba.
+
+    Accepts the knob's value forms: a channel set ("rgba", "rgb", "alpha",
+    "all", a layer name like "depth") or a space-separated per-channel list
+    ("rgba.red rgba.green depth.Z"). Anything outside the rgb/rgba/alpha
+    layers -- including "all" -- counts as beyond rgba.
+    """
+    sel = (selection or "").strip()
+    if not sel or sel == "none":
+        return False
+    if sel == "all":
+        return True
+    for part in sel.split():
+        if part.split(".")[0] not in ("rgb", "rgba", "alpha"):
+            return True
+    return False
+
+
+def _confirm_extra_channels(node):
+    """Warn before rendering a write whose interior Write outputs more than
+    rgba (bigger, slower files, usually unintended).
+
+    OK renders anyway, Cancel aborts. Ticking "don't warn me again" writes
+    warn_extra_channels = false to this user's TOML, so it is per-user and
+    re-enableable from the Quick Write Defaults dialog. Fails open.
+    """
+    try:
+        if not get_quick_write_defaults().get("warn_extra_channels", True):
+            return True
+    except Exception:
+        return True
+    interior = _find_interior_write(node)
+    if interior is None:
+        return True
+    knob = interior.knob("channels")
+    if knob is None:
+        return True
+    selection = knob.value()
+    if not _channels_beyond_rgba(selection):
+        return True
+    if nukescripts is None:
+        return True
+
+    panel = nukescripts.PythonPanel("Extra Channels")
+    panel.addKnob(nuke.Text_Knob(
+        "msg", "",
+        "<b>'{}'</b> is set to write <b>{}</b> -- more than rgba.<br><br>"
+        "Extra layers make bigger, slower files and are usually unintended."
+        "<br><br>OK renders anyway; Cancel aborts.".format(node.name(), selection),
+    ))
+    suppress = nuke.Boolean_Knob("suppress", "Don't warn me again (this user)")
+    suppress.setFlag(nuke.STARTLINE)
+    panel.addKnob(suppress)
+    proceed = panel.showModalDialog()
+
+    if suppress.value():
+        try:
+            _, user_toml = _resolved_toml_paths()
+            _write_quick_write_toml(user_toml, {"warn_extra_channels": False})
+            nuke.tprint(
+                "[hornet quick_write] extra-channels warning disabled for this "
+                "user ({}); re-enable via Quick Write Defaults.".format(user_toml)
+            )
+        except Exception as exc:
+            log.warning(f"Could not persist warn_extra_channels=false: {exc}")
+    return bool(proceed)
 
 
 def _resolved_toml_paths():
@@ -510,6 +614,7 @@ def _quick_write_node(variant, family="render", is_ovs=False, inpanel=True):
             "inside_" + family + os.environ["AYON_TASK_NAME"] + variant.title()
         )
         if family == "prerender":
+            _apply_prerender_channels(inside_write)
             inside_write.knob("file_type").setValue("exr")
         else:
             inside_write.knob("file_type").setValue("dpx")
@@ -612,7 +717,7 @@ _PRESERVE_ACROSS_FILETYPE = (
     "first", "last", "framelist",
     "publishFirst", "publishLast", "usePublishRange",
     "deadlinePriority", "deadlineChunkSize", "concurrentTasks",
-    "deadlinePool", "deadlineGroup", "skip_popup", "deadlineTaskTimeout",
+    "deadlinePool", "deadlineGroup", "skip_popup",
     "publish_on_farm", "generate_review_media", "burnin",
 )
 
@@ -893,14 +998,6 @@ def embedOptions():
     )
     deadlineChunkSize = nuke.Int_Knob("deadlineChunkSize", "    Chunk Size")
     concurrentTasks = nuke.Int_Knob("concurrentTasks", "    Concurrent Tasks")
-    deadlineTaskTimeout = nuke.Int_Knob(
-        "deadlineTaskTimeout", "Task Timeout (min)"
-    )
-    deadlineTaskTimeout.setTooltip(
-        "Deadline task timeout in minutes. A task still running after this "
-        "long is errored and requeued, so a hung frame is picked up again "
-        "rather than holding a worker. 0 = no timeout."
-    )
     # deadlinePool = nuke.String_Knob("deadlinePool", "Pool")
     deadlinePool = nuke.Enumeration_Knob("deadlinePool", "Pool", hornet_deadline_utils.get_deadline_pools())
     # deadlineGroup = nuke.String_Knob("deadlineGroup", "Group")
@@ -945,7 +1042,6 @@ def embedOptions():
     _d = get_quick_write_defaults()
     deadlineChunkSize.setValue(int(_d["deadlineChunkSize"]))
     concurrentTasks.setValue(int(_d["concurrentTasks"]))
-    deadlineTaskTimeout.setValue(int(_d.get("deadlineTaskTimeout", 0) or 0))
     # Empty pool default -> fall back to the project's primary Deadline pool.
     deadlinePool.setValue(_d["deadlinePool"] or get_deadlin_pool())
     deadlineGroup.setValue(_d["deadlineGroup"])
@@ -966,7 +1062,6 @@ def embedOptions():
     group.addKnob(deadlineChunkSize)
     group.addKnob(concurrentTasks)
     group.addKnob(concurrent_warning)
-    group.addKnob(deadlineTaskTimeout)
     group.addKnob(deadlinePool)
     group.addKnob(deadlineGroup)
 
@@ -1469,12 +1564,10 @@ class SubmitSettingsDialog(_PanelBase):
         self.addKnob(self.concurrent)
 
         # Task timeout: minutes before a still-running task is errored and
-        # requeued by Deadline. Old nodes (panel predates the knob) seed 0.
+        # requeued by Deadline. Popup-only setting, seeded from the TOML
+        # default (no node knob).
         self.timeout = nuke.Int_Knob("timeout", "Task Timeout (min)")
-        timeout_knob = node.knob("deadlineTaskTimeout")
-        self.timeout.setValue(
-            int(timeout_knob.value()) if timeout_knob is not None else 0
-        )
+        self.timeout.setValue(_default_task_timeout())
         self.timeout.setTooltip(
             "Minutes before a running task is errored and requeued. "
             "0 = no timeout."
@@ -1623,6 +1716,10 @@ def render_or_submit(node, local=False):
             f"Foreign-shot render allowed by user on '{node.name()}' "
             f"(work area: {foreign_prefix})"
         )
+    if not _confirm_extra_channels(node):
+        print("Render cancelled: write outputs more than rgba")
+        return
+
     if local:
         # Group-traversal lookup rather than nuke.toNode(f"inside_{name}") so
         # a stale interior name (e.g. from a paste or a failed rename) doesn't
@@ -1647,7 +1744,11 @@ def render_or_submit(node, local=False):
         # clamp can't clobber them and nothing persists past this submit.
         skip = node.knob("skip_popup")
         if skip is not None and skip.value():
-            deadlineNetworkSubmit(node=node)
+            # No popup -> the timeout still applies, from the TOML default.
+            deadlineNetworkSubmit(
+                node=node,
+                overrides={"deadlineTaskTimeout": _default_task_timeout()},
+            )
             return
         dialog = SubmitSettingsDialog(node)
         if not dialog.showModalDialog():
