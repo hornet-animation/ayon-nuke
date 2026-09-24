@@ -857,7 +857,7 @@ def embedOptions():
 
     Fires when the interior write's `file_type` changes. Purges every knob on
     the parent Group except those in DONT_DELETE, then rebuilds the full
-    property panel: the Output / Rendering / Publish
+    property panel: the Variant field, the Output / Rendering / Publish
     sections (format-dependent linked knobs, Deadline submission controls,
     publish controls) and the Info tab. Runs only on real Hornet groups
     (those carrying publish_instance) and is a no-op for other file_type
@@ -917,6 +917,25 @@ def embedOptions():
     else:
         is_ovs = False
 
+
+    # === Variant field -- sits at the very top of the panel ===
+    # Backed by the `variant` key in publish_instance JSON. Edits trigger
+    # on_variant_field_changed, which renames the node and interior write and
+    # rewrites the render paths. Shown without the leading underscore.
+    variant_field = nuke.String_Knob("variant_field", "Variant")
+    try:
+        _current_variant = parse_publish_instance(group).get("variant", "")
+        variant_field.setValue(_current_variant.lstrip("_"))
+    except Exception as _e:
+        log.warning(f"Could not seed variant_field initial value: {_e}")
+    variant_field.setTooltip(
+        "Rename this write's variant. Renames the node, the interior write, "
+        "and the render output path. Any frames already rendered to the old "
+        "path are left in place; you must clean them up manually."
+    )
+    variant_field.setFlag(nuke.STARTLINE)
+    group.addKnob(variant_field)
+    group.addKnob(nuke.Text_Knob("variant_divider", "", ""))
 
     # Section headers are plain Text_Knobs, not collapsible groups: group
     # headers ignore rich text, but Text_Knob values render HTML, so these
@@ -1747,8 +1766,8 @@ def show_instance_data(node):
 def render_or_submit(node, local=False):
     """ wrapper for Deadline and Render Local buttons."""
     # Pre-flight: scan whole script for duplicate variants. Cheap enough to
-    # do every submit; run here rather than on knob changes so it never
-    # re-scans on every keystroke.
+    # do every submit; deliberately not wired to the variant_field knob's
+    # knobChanged so we don't re-scan on every keystroke.
     duplicates = find_duplicate_variants_in_script()
     if duplicates:
         lines = []
@@ -1761,8 +1780,7 @@ def render_or_submit(node, local=False):
             "Cannot render: duplicate variant names found in this script.\n\n"
             + "\n".join(lines)
             + "\n\nEach Hornet write node must have a unique variant. "
-            "Delete and recreate one of the colliding nodes so each has "
-            "a distinct variant, then try again."
+            "Edit the Variant field on the colliding nodes and try again."
         )
         log.warning(
             f"Render aborted on '{node.name()}' -- duplicate variants: "
@@ -3083,6 +3101,57 @@ def _apply_variant_change(node, new_variant_raw, interactive=True):
     )
     return True, None
 
+
+def on_variant_field_changed():
+    """knobChanged handler for the variant_field String_Knob on the panel.
+
+    Registered globally on Group nodes; filters to Hornet write nodes and to
+    the variant_field knob specifically.
+    """
+    node = nuke.thisNode()
+    knob = nuke.thisKnob()
+    if knob is None or knob.name() != "variant_field":
+        return
+    if INSTANCE_DATA_KNOB not in node.knobs():
+        return
+
+    new_raw = knob.value()
+    try:
+        current = parse_publish_instance(node).get("variant", "")
+    except Exception:
+        current = ""
+
+    normalized = _normalize_variant(new_raw)
+    if normalized is None or normalized == current:
+        return
+
+    ok, err = _apply_variant_change(node, new_raw)
+    if not ok:
+        # Restore the visible field to the unchanged variant
+        try:
+            knob.setValue(current.lstrip("_"))
+        except Exception:
+            pass
+        nuke.message(f"Variant change rejected:\n\n{err}")
+        return
+
+    # Normalize what the user sees (e.g. "main " -> "Main")
+    try:
+        knob.setValue(normalized.lstrip("_"))
+    except Exception:
+        pass
+
+
+# --- Paste dedup -----------------------------------------------------------
+# A copy/pasted Hornet write node arrives with the same variant as its
+# source, silently duplicating a product. dedup_variant_on_create below
+# auto-increments the pasted node's variant to keep variants unique.
+#
+# Script load must NOT trigger it (opening a saved script must never mutate
+# it), but onCreate fires for every node during load too. Loading is
+# detected with the Root-onCreate + deferred-clear pair: every load (startup,
+# File > New, File > Open) creates a Root first, while a paste never does.
+# The deferred clear runs only after the synchronous load finishes.
 
 _SCRIPT_LOADING = {"active": False}
 

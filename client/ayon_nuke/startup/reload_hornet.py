@@ -27,6 +27,7 @@ _QW_CALLBACK_SPECS = [
     (nuke.addKnobChanged, nuke.removeKnobChanged, "refresh_deadline_callback", {"nodeClass": "Group"}),
     (nuke.addKnobChanged, nuke.removeKnobChanged, "on_priority_clamp", {"nodeClass": "Group"}),
     (nuke.addKnobChanged, nuke.removeKnobChanged, "auto_match_publish_range", {"nodeClass": "Group"}),
+    (nuke.addKnobChanged, nuke.removeKnobChanged, "on_variant_field_changed", {"nodeClass": "Group"}),
     (nuke.addOnCreate, nuke.removeOnCreate, "restore_file_output_height", {"nodeClass": "Group"}),
     # Paste dedup: Root onCreate flags script-load windows (loads must never
     # trigger the dedup); Group onCreate dedups pasted duplicate variants.
