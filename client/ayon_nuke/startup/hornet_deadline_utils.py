@@ -8,6 +8,8 @@ import requests
 from pathlib import Path
 from datetime import datetime
 
+import script_sanitize
+
 try:
     from ayon_core.settings import get_current_project_settings  # type: ignore
     from ayon_api import get_bundle_settings  # type: ignore
@@ -238,7 +240,7 @@ def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None, ove
     if node is None:
         raise Exception("Node provided to submitter None")
 
-    _assert_no_local_reads()
+    _assert_no_local_reads(node)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
     temp_script_path = "{path}/submission/{name}_{time}.nk".format(
@@ -274,7 +276,8 @@ def deadlineNetworkSubmit(*, dev=False, batch=None, silent=False, node=None, ove
     ):
         os.mkdir(os.path.join(os.environ["AYON_WORKDIR"], "submission"))
     print(f"temp_script_path: {temp_script_path}")
-    nuke.scriptSaveToTemp(temp_script_path)
+    # Only what this node needs (mode-dependent; never blocks the submit).
+    script_sanitize.save_render_script(node, temp_script_path)
 
     deadline_url = get_deadline_url()
 
@@ -337,14 +340,31 @@ def _rez_extra_info_pairs():
 LOCAL_DRIVES = ("C",)
 
 
-def _local_read_paths():
-    """[(node full name, path)] for Read/DeepRead nodes on a local drive."""
+def _reads_to_check(start=None):
+    """Read/DeepRead nodes to vet: only those upstream of `start` (what the
+    sanitised render script will actually load), or every Read in the script
+    when no start node is given or the walk fails."""
+    if start is not None:
+        try:
+            closure = script_sanitize.upstream_closure(start)
+            return [
+                n for n in script_sanitize.nodes_within(closure.values())
+                if n.Class() in ("Read", "DeepRead")
+            ]
+        except Exception as exc:
+            print("upstream Read scan failed, checking all Reads: {}".format(exc))
+    return nuke.allNodes("Read", recurseGroups=True) + nuke.allNodes(
+        "DeepRead", recurseGroups=True
+    )
+
+
+def _local_read_paths(start=None):
+    """[(node full name, path)] for Read/DeepRead nodes on a local drive --
+    upstream of `start` only, when given."""
     import ntpath
 
     hits = []
-    for read in nuke.allNodes("Read", recurseGroups=True) + nuke.allNodes(
-        "DeepRead", recurseGroups=True
-    ):
+    for read in _reads_to_check(start):
         for knob_name in ("file", "proxy"):
             knob = read.knob(knob_name)
             if knob is None:
@@ -365,9 +385,11 @@ def _local_read_paths():
     return hits
 
 
-def _assert_no_local_reads():
-    """Raise if any Read references a local drive -- the farm would fail."""
-    hits = _local_read_paths()
+def _assert_no_local_reads(start=None):
+    """Raise if a Read the render needs references a local drive -- the farm
+    would fail. Disconnected Reads elsewhere in the script don't count: the
+    sanitised render script never loads them."""
+    hits = _local_read_paths(start)
     if hits:
         raise RuntimeError(
             "Refusing to submit: {} Read node(s) reference a local drive the "
@@ -641,7 +663,8 @@ def vanilla_submit(write_node, frame_range=None, *, dev=False, batch=None, silen
         os.mkdir(os.path.join(os.environ["AYON_WORKDIR"], "submission"))
     
     print(f"temp_script_path: {temp_script_path}")
-    nuke.scriptSaveToTemp(temp_script_path)
+    _assert_no_local_reads(write_node)
+    script_sanitize.save_render_script(write_node, temp_script_path)
     
     deadline_url = get_deadline_url()
     

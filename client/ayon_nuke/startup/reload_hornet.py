@@ -9,6 +9,7 @@ import nuke
 HORNET_MODULES = [
     "quick_write",
     "read_node_utils",
+    "script_sanitize",
     "hornet_deadline_utils",
     "hornet_publish_utils",
     "file_sequence",

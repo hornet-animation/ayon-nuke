@@ -37,6 +37,7 @@ QUICK_WRITE_DEFAULTS = {
     "prerender_channels": "rgba",   # channels new PreWrite nodes start with; "" = Nuke default
     "warn_extra_channels": True,    # warn before rendering more than rgba; the popup can turn it off per user
     "forbidden_read_drives": "C",   # Reads on these drive letters block farm submission; "" disables
+    "sanitize_render_script": "log",  # farm script: "off" full copy, "log" full + report, "on" upstream nodes only
     "deadlinePool": "",
     "deadlineGroup": "nuke",
     "generate_review_media": True,

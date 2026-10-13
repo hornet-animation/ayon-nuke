@@ -122,6 +122,10 @@ _QW_DEFAULTS = {
     # proxy) path lives on one of these blocks farm submission outright.
     # Comma/space separated letters; "" disables the check.
     "forbidden_read_drives": "C",
+    # Farm copy of the script: "off" = full copy as before, "log" = full copy
+    # plus a report of what would be stripped, "on" = only the nodes upstream
+    # of the submitted write (full copy kept beside it as *_full.nk).
+    "sanitize_render_script": "log",
     # Warn before rendering/submitting a write set to more than rgba (e.g.
     # "all"). The warning's "don't warn me again" writes this False to the
     # user TOML; re-enable via Quick Write Defaults.
@@ -364,9 +368,10 @@ def _forbidden_read_drives():
     }
 
 
-def _local_read_nodes(drives=None):
-    """Read/DeepRead nodes (anywhere in the script) whose file or proxy path
-    sits on a forbidden drive letter. Returns [(node, offending_path), ...].
+def _local_read_nodes(drives=None, start=None):
+    """Read/DeepRead nodes whose file or proxy path sits on a forbidden drive
+    letter. Returns [(node, offending_path), ...]. With `start`, only Reads
+    upstream of it count (the sanitised farm script loads nothing else).
 
     Checks both the raw knob value and its evaluation (TCL/expressions), so a
     path built at runtime is caught too. ntpath.splitdrive handles either
@@ -378,9 +383,7 @@ def _local_read_nodes(drives=None):
     if not drives:
         return []
     offenders = []
-    for read in nuke.allNodes("Read", recurseGroups=True) + nuke.allNodes(
-        "DeepRead", recurseGroups=True
-    ):
+    for read in hornet_deadline_utils._reads_to_check(start):
         for knob_name in ("file", "proxy"):
             knob = read.knob(knob_name)
             if knob is None:
@@ -409,7 +412,7 @@ def _confirm_no_local_reads(node):
     offending nodes, selects them in the DAG for easy fixing, and returns
     False. Local renders are unaffected (checked only on the farm path).
     """
-    offenders = _local_read_nodes()
+    offenders = _local_read_nodes(start=node)
     if not offenders:
         return True
     drives = ", ".join(sorted(d + ":" for d in _forbidden_read_drives()))
