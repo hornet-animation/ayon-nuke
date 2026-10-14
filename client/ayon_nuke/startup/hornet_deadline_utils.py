@@ -464,6 +464,9 @@ def build_request(knobValues, temp_script_path, node):
             + node.fullName(),
             # pass submitter user
             "UserName": getpass.getuser(),
+            # Free-text note from the submit popup; shown in Deadline
+            # Monitor's Comment column.
+            "Comment": str(knobValues.get("deadlineComment") or "").strip(),
             "Priority": int(knobValues.get("deadlinePriority")) or 95,
             "Pool": knobValues.get("deadlinePool") or "local",
             "SecondaryPool": "",

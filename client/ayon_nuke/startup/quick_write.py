@@ -1735,6 +1735,14 @@ class SubmitSettingsDialog(_PanelBase):
         )
         self.addKnob(self.timeout)
 
+        # Shown in Deadline Monitor's Comment column for this job.
+        self.comment = nuke.String_Knob("comment", "Comment")
+        self.comment.setTooltip(
+            "Note for this submission, shown in Deadline Monitor's Comment "
+            "column (e.g. what changed, who it's for)."
+        )
+        self.addKnob(self.comment)
+
         pool_node_knob = node.knob("deadlinePool")
         self.pool = nuke.Enumeration_Knob(
             "pool", "Pool", list(pool_node_knob.values())
@@ -1757,6 +1765,7 @@ class SubmitSettingsDialog(_PanelBase):
             "deadlineChunkSize": int(self.chunk.value()),
             "concurrentTasks": int(self.concurrent.value()),
             "deadlineTaskTimeout": int(self.timeout.value()),
+            "deadlineComment": self.comment.value(),
             "deadlinePool": self.pool.value(),
             "deadlineGroup": self.group.value(),
         }
