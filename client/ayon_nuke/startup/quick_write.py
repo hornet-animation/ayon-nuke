@@ -1,6 +1,5 @@
 import nuke
 import os
-import tempfile
 import re
 from ayon_nuke import api
 import json
@@ -2029,88 +2028,40 @@ def update_ovs_write_version(node):
 
 # Backdrops drawn by older builds; still removed so scripts don't keep them.
 OBSOLETE_BACKDROP_PREFIX = "obsolete_locate_"
-# Red vertical "obsolete" tag drawn on the node via Nuke's per-node `icon`
-# knob (absolute path so it resolves regardless of NUKE_PATH).
-OBSOLETE_ICON = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "obsolete.png"
-).replace("\\", "/")
+# Obsolete marker: one red line appended to the node's label. It travels with
+# the node, can't overlap anything and doesn't widen it. The line is matched
+# exactly when clearing, so the rest of the label (publish version readout,
+# FOREIGN SHOT prefix, artist notes) is never touched.
+OBSOLETE_LABEL_LINE = "<font color='#e03030'><b>obsolete</b></font>"
 
-# Nuke draws the `icon` at the node's LEFT edge and does not resize the node
-# for it, so the bare tag overlaps the name. We composite it onto a transparent
-# strip as wide as the node, so the visible text lands just past the RIGHT
-# edge, hanging off the node like a tab. One padded PNG per node width, cached
-# here (temp dir: regenerated on demand, safe to wipe).
-_OBSOLETE_ICON_CACHE = os.path.join(
-    tempfile.gettempdir(), "hornet_obsolete_icons"
-).replace("\\", "/")
-_OBSOLETE_ICON_GAP = 6  # px between the node's right edge and the tag
+# Earlier builds drew the tag through the node's `icon` knob (padded copies in
+# a temp cache); recognised here only so _set_obsolete_marker clears them.
+_LEGACY_OBSOLETE_ICON = "/obsolete.png"
+_LEGACY_OBSOLETE_ICON_CACHE = "hornet_obsolete_icons"
 
 
-def _padded_obsolete_icon(node):
-    """Path to the obsolete tag padded to sit right of `node`, or None.
+def _set_obsolete_marker(node, on):
+    """Add or remove the red 'obsolete' label line on `node` (only ever
+    touches that line), and clear any icon tag left by older builds."""
+    icon = node.knob("icon")
+    if icon is not None:
+        current = (icon.value() or "").replace("\\", "/")
+        if current.endswith(_LEGACY_OBSOLETE_ICON) or _LEGACY_OBSOLETE_ICON_CACHE in current:
+            icon.setValue("")
 
-    Returns None when the node has no layout width yet (e.g. onScriptLoad
-    before the DAG has laid it out) or Qt is unavailable; callers then fall
-    back to the bare asset.
-    """
-    try:
-        width = int(node.screenWidth())
-    except Exception:
-        width = 0
-    if width <= 0:
-        return None
-    pad = width + _OBSOLETE_ICON_GAP
-    # Key the cache on the asset's mtime too, so a regenerated obsolete.png
-    # (new orientation, size, colour) invalidates padded copies made from
-    # the old one instead of being served stale.
-    try:
-        stamp = int(os.path.getmtime(OBSOLETE_ICON))
-    except OSError:
-        stamp = 0
-    out = "{}/obsolete_pad{}_{}.png".format(_OBSOLETE_ICON_CACHE, pad, stamp)
-    if os.path.isfile(out):
-        return out
-    try:
-        from qtpy import QtGui
-
-        tag = QtGui.QImage(OBSOLETE_ICON)
-        if tag.isNull():
-            return None
-        fmt = getattr(QtGui.QImage, "Format_ARGB32", None)
-        if fmt is None:
-            fmt = QtGui.QImage.Format.Format_ARGB32
-        img = QtGui.QImage(pad + tag.width(), tag.height(), fmt)
-        img.fill(QtGui.QColor(0, 0, 0, 0))
-        painter = QtGui.QPainter(img)
-        painter.drawImage(pad, 0, tag)
-        painter.end()
-        os.makedirs(_OBSOLETE_ICON_CACHE, exist_ok=True)
-        if not img.save(out, "PNG"):
-            return None
-        return out
-    except Exception as exc:
-        log.warning(f"Obsolete icon padding failed, using bare tag: {exc}")
-        return None
-
-
-def _set_obsolete_icon(node, on):
-    """Show or clear the obsolete tag on `node` (only ever touches our icon).
-
-    Once a node is tagged it is left alone on later runs: recomputing from
-    screenWidth() after the (wider) icon is applied could otherwise creep.
-    """
-    knob = node.knob("icon")
-    if knob is None:
+    label = node.knob("label")
+    if label is None:
         return
-    current = (knob.value() or "").replace("\\", "/")
-    ours = current == OBSOLETE_ICON or current.startswith(_OBSOLETE_ICON_CACHE)
-    if not on:
-        if ours:
-            knob.setValue("")
-        return
-    if ours:
-        return
-    knob.setValue(_padded_obsolete_icon(node) or OBSOLETE_ICON)
+    value = label.value() or ""
+    lines = [
+        line for line in (value.split("\n") if value else [])
+        if line != OBSOLETE_LABEL_LINE
+    ]
+    if on:
+        lines.append(OBSOLETE_LABEL_LINE)
+    new = "\n".join(lines)
+    if new != value:
+        label.setValue(new)
 
 
 def locate_obsolete_nodes(notify=True):
@@ -2118,9 +2069,8 @@ def locate_obsolete_nodes(notify=True):
 
     A node is obsolete when its stamped addon version differs from the current
     ADDON_VERSION, or when it carries no stamp at all (created before stamping
-    existed). Each match gets a red vertical "obsolete" tag drawn on the node
-    (its `icon` knob); up-to-date nodes have the tag cleared, so a re-run after
-    fixing nodes tidies itself up. Intended for checking extant nodes after an
+    existed). Each match gets a red "obsolete" line in its label; up-to-date
+    nodes have it cleared, so a re-run after fixing nodes tidies itself up. Intended for checking extant nodes after an
     addon update.
 
     Args:
@@ -2132,7 +2082,7 @@ def locate_obsolete_nodes(notify=True):
         knob = node.knob(ADDON_VERSION_KNOB)
         stamped = knob.value().strip() if knob else ""
         is_obsolete = stamped != ADDON_VERSION
-        _set_obsolete_icon(node, is_obsolete)
+        _set_obsolete_marker(node, is_obsolete)
         if is_obsolete:
             obsolete.append((node, stamped or "<unstamped>"))
 
@@ -2181,8 +2131,8 @@ def locate_obsolete_on_load():
             )
             nuke.message(
                 "WARNING: {} obsolete AYON write node(s) found in this script "
-                "(current addon {}).\nThey carry a red 'obsolete' tag in the "
-                "node graph.\n\n{}".format(len(found), ADDON_VERSION, lines)
+                "(current addon {}).\nThey carry a red 'obsolete' line in their "
+                "label in the node graph.\n\n{}".format(len(found), ADDON_VERSION, lines)
             )
     except Exception as e:
         log.warning(f"locate_obsolete_on_load failed: {e}")
