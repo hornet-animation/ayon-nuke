@@ -812,6 +812,7 @@ _PRESERVE_ACROSS_FILETYPE = (
     "publishFirst", "publishLast", "usePublishRange",
     "deadlinePriority", "deadlineChunkSize", "concurrentTasks",
     "deadlinePool", "deadlineGroupFilter", "deadlineGroup", "skip_popup",
+    "skip_publish_popup",
     "publish_on_farm", "generate_review_media", "burnin",
 )
 
@@ -1076,9 +1077,8 @@ def embedOptions():
     skip_popup.setValue(False)
     skip_popup.clearFlag(nuke.STARTLINE)
     skip_popup.setTooltip(
-        "Skip the Submission Settings popup (Submit to Deadline) and the "
-        "Publish Settings popup (Quick Publish), and use the node's current "
-        "settings directly."
+        "Skip the Submission Settings popup and submit straight to Deadline "
+        "using the node's current settings."
     )
 
     clear_temp_outputs_button = nuke.PyScript_Knob(
@@ -1330,6 +1330,14 @@ def embedOptions():
     # Publish action buttons.
     quick_publish_button.setFlag(nuke.STARTLINE)
     group.addKnob(quick_publish_button)
+    skip_publish_popup = nuke.Boolean_Knob("skip_publish_popup", "skip popup")
+    skip_publish_popup.setValue(False)
+    skip_publish_popup.clearFlag(nuke.STARTLINE)
+    skip_publish_popup.setTooltip(
+        "Skip the Publish Settings popup and publish straight away using the "
+        "node's current settings and publish range."
+    )
+    group.addKnob(skip_publish_popup)
     group.addKnob(read_from_publish_button)
     group.addKnob(navigate_to_publish_button)
 
@@ -1676,18 +1684,31 @@ class PublishSettingsDialog(_PanelBase):
             latest, _ = get_latest_publish_version(node)
         except Exception:
             latest = None
-        pf, pl = node.knob("publishFirst"), node.knob("publishLast")
-        rng = (
-            "{}-{}".format(int(pf.value()), int(pl.value()))
-            if pf is not None and pl is not None else "?"
-        )
-        summary = "<b>{}</b><br>publish range {}".format(node.name(), rng)
+        summary = "<b>{}</b>".format(node.name())
         if is_ovs:
             summary += "<br>OVS: version resolved from the frames on disk"
         if latest is not None:
             summary += "<br>latest published v{:03d}".format(int(latest))
         self.addKnob(nuke.Text_Knob("summary", "", summary))
         self.addKnob(nuke.Text_Knob("div", "", ""))
+
+        # Publish range for THIS publish, seeded from the node. The publish
+        # reads the node's publishFirst/publishLast, so an edit here is applied
+        # to the node for the duration of the publish and then put back.
+        pf, pl = node.knob("publishFirst"), node.knob("publishLast")
+        self._has_range = pf is not None and pl is not None
+        if self._has_range:
+            self.first = nuke.Int_Knob("publish_first", "Publish Range")
+            self.first.setValue(int(pf.value()))
+            self.last = nuke.Int_Knob("publish_last", "to")
+            self.last.setValue(int(pl.value()))
+            self.last.clearFlag(nuke.STARTLINE)
+            self.first.setTooltip(
+                "Frames to publish this time only; the node keeps its own "
+                "range. First = last publishes a single frame (image)."
+            )
+            self.addKnob(self.first)
+            self.addKnob(self.last)
 
         # Only offer the toggles the node actually has (prerenders have no
         # review/burnin options).
@@ -1710,6 +1731,13 @@ class PublishSettingsDialog(_PanelBase):
         """The dialog's value for a toggle (False if the node lacks it)."""
         box = self._toggles.get(knob_name)
         return bool(box.value()) if box is not None else False
+
+    def publish_range(self):
+        """(first, last) chosen in the dialog, or None if the node has no
+        publish range knobs."""
+        if not self._has_range:
+            return None
+        return int(self.first.value()), int(self.last.value())
 
 
 class SubmitSettingsDialog(_PanelBase):
@@ -2658,7 +2686,8 @@ def quick_publish_wrapper(node):
         print("Publish cancelled: target version already exists")
         return
 
-    skip = node.knob("skip_popup")
+    range_override = None
+    skip = node.knob("skip_publish_popup")
     if (skip is not None and skip.value()) or nukescripts is None:
         # No popup: publish with the node's own options, as before.
         review_knob = node.knobs().get("generate_review_media")
@@ -2680,8 +2709,33 @@ def quick_publish_wrapper(node):
         review = dialog.option("generate_review_media")
         integrate_farm = dialog.option("publish_on_farm")
         burnin = dialog.option("burnin")
+        range_override = dialog.publish_range()
+        if range_override is not None and range_override[1] < range_override[0]:
+            nuke.message(
+                "Publish range end ({1}) is before its start ({0}); nothing "
+                "published.".format(*range_override)
+            )
+            return
     # review extraction follows the publish location
     review_farm = integrate_farm
+
+    # Range override: the collectors read publishFirst/publishLast off the
+    # node, so set them for the publish and restore them afterwards. The
+    # script saved mid-publish records the published range; the session is
+    # put back and marked modified so the next save matches the panel again.
+    saved_range = None
+    pf, pl = node.knob("publishFirst"), node.knob("publishLast")
+    if range_override is not None and pf is not None and pl is not None:
+        current = (int(pf.value()), int(pl.value()))
+        if current != range_override:
+            saved_range = current
+            pf.setValue(range_override[0])
+            pl.setValue(range_override[1])
+            log.info(
+                f"Publishing '{node.name()}' with range override "
+                f"{range_override[0]}-{range_override[1]} (node keeps "
+                f"{current[0]}-{current[1]})"
+            )
 
     _OVS_SYNC_SUSPENDED["active"] = True
     try:
@@ -2695,6 +2749,13 @@ def quick_publish_wrapper(node):
             )
     finally:
         _OVS_SYNC_SUSPENDED["active"] = False
+        if saved_range is not None:
+            try:
+                pf.setValue(saved_range[0])
+                pl.setValue(saved_range[1])
+                nuke.root().setModified(True)
+            except Exception as e:
+                log.warning(f"Could not restore publish range: {e}")
 
     # Reflect the new version in the read-only label (best effort).
     refresh_latest_publish_display(node)
