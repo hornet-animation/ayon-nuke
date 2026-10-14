@@ -133,6 +133,9 @@ _QW_DEFAULTS = {
     "warn_extra_channels": True,
     "deadlinePool": "",          # "" -> the project's primary Deadline pool
     "deadlineGroup": "nuke",
+    # Text filter applied to the Deadline Group dropdown (case-insensitive
+    # substring); "" shows every group. No match -> the full list.
+    "deadlineGroupFilter": "nuke",
     "generate_review_media": True,
     "burnin": True,
     "publish_on_farm": False,
@@ -809,7 +812,7 @@ _PRESERVE_ACROSS_FILETYPE = (
     "first", "last", "framelist",
     "publishFirst", "publishLast", "usePublishRange",
     "deadlinePriority", "deadlineChunkSize", "concurrentTasks",
-    "deadlinePool", "deadlineGroup", "skip_popup",
+    "deadlinePool", "deadlineGroupFilter", "deadlineGroup", "skip_popup",
     "publish_on_farm", "generate_review_media", "burnin",
 )
 
@@ -1113,7 +1116,18 @@ def embedOptions():
     # deadlinePool = nuke.String_Knob("deadlinePool", "Pool")
     deadlinePool = nuke.Enumeration_Knob("deadlinePool", "Pool", hornet_deadline_utils.get_deadline_pools())
     # deadlineGroup = nuke.String_Knob("deadlineGroup", "Group")
-    deadlineGroup = nuke.Enumeration_Knob("deadlineGroup", "Group", hornet_deadline_utils.get_deadline_groups())
+    deadlineGroup = nuke.Enumeration_Knob(
+        "deadlineGroup", "Group",
+        filter_deadline_groups(
+            hornet_deadline_utils.get_deadline_groups(),
+            get_quick_write_defaults().get("deadlineGroupFilter", "nuke"),
+        ),
+    )
+    deadlineGroupFilter = nuke.String_Knob("deadlineGroupFilter", "filter")
+    deadlineGroupFilter.setTooltip(
+        "Only list Deadline groups containing this text (case-insensitive). "
+        "Empty shows every group; no match shows the full list."
+    )
 
     read_from_publish_button = nuke.PyScript_Knob(
         "readfrompublish",
@@ -1156,7 +1170,9 @@ def embedOptions():
     concurrentTasks.setValue(int(_d["concurrentTasks"]))
     # Empty pool default -> fall back to the project's primary Deadline pool.
     deadlinePool.setValue(_d["deadlinePool"] or get_deadlin_pool())
-    deadlineGroup.setValue(_d["deadlineGroup"])
+    deadlineGroupFilter.setValue(str(_d.get("deadlineGroupFilter", "nuke") or ""))
+    if _d["deadlineGroup"] in deadlineGroup.values():
+        deadlineGroup.setValue(_d["deadlineGroup"])
     deadlinePriority.setValue(int(_d["deadlinePriority"]))
 
     usePublishRange.setFlag(nuke.STARTLINE)
@@ -1169,6 +1185,7 @@ def embedOptions():
     concurrentTasks.clearFlag(nuke.STARTLINE)
     concurrent_warning.clearFlag(nuke.STARTLINE)
     deadlineGroup.clearFlag(nuke.STARTLINE)  # Pool and Group share a line
+    deadlineGroupFilter.clearFlag(nuke.STARTLINE)  # filter sits beside Group
 
     group.addKnob(deadlinePriority)
     group.addKnob(deadlineChunkSize)
@@ -1176,6 +1193,7 @@ def embedOptions():
     group.addKnob(concurrent_warning)
     group.addKnob(deadlinePool)
     group.addKnob(deadlineGroup)
+    group.addKnob(deadlineGroupFilter)
 
     # Invisible filler at the end of the Pool/Group row: the last widget on a
     # line stretches to fill it, so without this the Group dropdown hogs the
@@ -1387,6 +1405,10 @@ def embedOptions():
     _apply_default_compression(nde, ftype)
 
     _restore_settings(group, nde, _preserved)
+    try:
+        apply_deadline_group_filter(group, keep=_preserved.get("deadlineGroup"))
+    except Exception as e:
+        log.warning(f"Could not apply Deadline group filter: {e}")
 
     # Initial label-color state for the publish range knobs.
     update_publish_range_color(group)
@@ -2757,13 +2779,43 @@ def refresh_deadline_groups(quick_write_node):
     """Re-query the live Deadline group list and repopulate the node's
     deadlineGroup enum, preserving the current selection when it still
     exists (else falling back to the first entry)."""
-    group_knob = quick_write_node.knobs().get("deadlineGroup")
-    current_group = group_knob.value()
-    group_knob.setValues(hornet_deadline_utils.get_deadline_groups())
-    if current_group in group_knob.values():
-        group_knob.setValue(current_group)
-    else:
-        group_knob.setValue(group_knob.values()[0])
+    apply_deadline_group_filter(
+        quick_write_node, groups=hornet_deadline_utils.get_deadline_groups()
+    )
+
+
+def filter_deadline_groups(groups, text):
+    """Groups containing `text` (case-insensitive substring). Empty text ->
+    all groups; no match -> all groups, so the dropdown is never empty
+    because of a typo."""
+    groups = list(groups or [])
+    needle = (text or "").strip().lower()
+    if not needle:
+        return groups
+    matches = [g for g in groups if needle in str(g).lower()]
+    return matches or groups
+
+
+def apply_deadline_group_filter(node, groups=None, keep=None):
+    """Repopulate the node's deadlineGroup enum through its filter field.
+
+    `groups` defaults to the enum's full Deadline list (re-queried); `keep`
+    is the selection to hold onto (default: current), falling back to the
+    first filtered entry when it no longer qualifies.
+    """
+    group_knob = node.knob("deadlineGroup")
+    if group_knob is None:
+        return
+    filt = node.knob("deadlineGroupFilter")
+    text = filt.value() if filt is not None else ""
+    if groups is None:
+        groups = hornet_deadline_utils.get_deadline_groups()
+    wanted = keep if keep is not None else group_knob.value()
+    values = filter_deadline_groups(groups, text)
+    if not values:
+        return
+    group_knob.setValues(values)
+    group_knob.setValue(wanted if wanted in values else values[0])
 
 
 def refresh_deadline_callback():
@@ -2777,7 +2829,7 @@ def refresh_deadline_callback():
             refresh_deadline_pools(node)
         except Exception as e:
             log.error(f"Error refreshing deadline pools: {e}")
-    elif knob.name() == "deadlineGroup":
+    elif knob.name() in ("deadlineGroup", "deadlineGroupFilter"):
         try:
             refresh_deadline_groups(node)
         except Exception as e:

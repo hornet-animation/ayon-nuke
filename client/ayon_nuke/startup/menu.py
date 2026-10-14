@@ -40,6 +40,7 @@ QUICK_WRITE_DEFAULTS = {
     "sanitize_render_script": "reads",  # farm script: "off" full, "reads" minus unused Reads, "log" full + report, "on" upstream only
     "deadlinePool": "",
     "deadlineGroup": "nuke",
+    "deadlineGroupFilter": "nuke",  # filter for the Group dropdown; "" = show all
     "generate_review_media": True,
     "burnin": True,
     "publish_on_farm": False,
