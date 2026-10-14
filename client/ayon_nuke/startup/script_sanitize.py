@@ -13,11 +13,16 @@ block built from the live root's knobs is put in front. No nodes are deleted,
 no undo is involved, and no second Nuke is launched.
 
 Modes (TOML default "sanitize_render_script"):
-    "off"  full copy via scriptSaveToTemp, exactly as before
-    "log"  full copy, plus a report of what WOULD be stripped (default while
-           this is new -- use it to find references the walk can't see)
-    "on"   sanitised copy; the full copy is kept beside it as *_full.nk, and
-           any failure falls back to the full copy rather than block a submit
+    "off"   full copy via scriptSaveToTemp, exactly as before
+    "reads" (default) full script minus top-level Read/DeepRead nodes that
+            nothing depends on -- no pipe, hidden input or expression link uses
+            them. Everything else is kept, so this is the low-risk cleanup
+    "log"   full copy, plus a report of what "on" WOULD strip -- use it to
+            find references the upstream walk can't see
+    "on"    only the nodes upstream of the submitted node; the full copy is
+            kept beside it as *_full.nk
+Any failure in "reads" or "on" falls back to the full copy rather than block
+a submit.
 
 Known blind spot: nodes referenced only from python inside an expression
 ([python nuke.toNode("X")...]) or by name from a callback are invisible to
@@ -40,7 +45,7 @@ _BUILTIN_LAYERS = {
     "mask", "rotopaint_mask", "other",
 }
 
-MODES = ("off", "log", "on")
+MODES = ("off", "reads", "log", "on")
 
 
 def _mode():
@@ -50,12 +55,12 @@ def _mode():
 
         mode = str(
             quick_write.get_quick_write_defaults().get(
-                "sanitize_render_script", "log"
+                "sanitize_render_script", "reads"
             )
         ).strip().lower()
     except Exception:
-        mode = "log"
-    return mode if mode in MODES else "log"
+        mode = "reads"
+    return mode if mode in MODES else "reads"
 
 
 def _top_level(node):
@@ -197,10 +202,32 @@ def _copy_nodes(tops):
             pass
 
 
-def build_sanitised_script(start):
-    """Return (script_text, closure) for a script holding only what `start`
-    needs. Raises ValueError if the copied text looks incomplete."""
-    closure = upstream_closure(start)
+def unused_reads():
+    """Top-level Read/DeepRead nodes nothing depends on (no pipe, hidden
+    input or expression link uses them)."""
+    out = []
+    for node in nuke.allNodes("Read") + nuke.allNodes("DeepRead"):
+        try:
+            if not node.dependent(_DEP_FLAGS):
+                out.append(node)
+        except Exception:
+            continue  # unsure -> keep it
+    return out
+
+
+def keep_all_but_unused_reads():
+    """{fullName: node} for every top-level node except unused Reads."""
+    drop = {n.fullName() for n in unused_reads()}
+    return {
+        n.fullName(): n for n in nuke.allNodes() if n.fullName() not in drop
+    }
+
+
+def build_sanitised_script(start, keep=None):
+    """Return (script_text, kept) for a script holding only the `keep` nodes
+    ({fullName: node}; default: what `start` needs upstream). Raises
+    ValueError if the copied text looks incomplete."""
+    closure = upstream_closure(start) if keep is None else keep
     body = _copy_nodes(list(closure.values()))
 
     version_line = None
@@ -240,6 +267,29 @@ def save_render_script(start, out_path, log=None):
 
     if mode == "off":
         nuke.scriptSaveToTemp(out_path)
+        return out_path
+
+    if mode == "reads":
+        dropped = unused_reads()
+        if not dropped:
+            nuke.scriptSaveToTemp(out_path)
+            return out_path
+        try:
+            text, _ = build_sanitised_script(
+                start, keep=keep_all_but_unused_reads()
+            )
+        except Exception as exc:
+            say("[sanitize] could not strip unused Reads ({}); submitting "
+                "the full script".format(exc))
+            nuke.scriptSaveToTemp(out_path)
+            return out_path
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        names = sorted(n.name() for n in dropped)
+        say("[sanitize] {}: removed {} unused Read node(s): {}{}".format(
+            start.name(), len(names), ", ".join(names[:40]),
+            " ..." if len(names) > 40 else "",
+        ))
         return out_path
 
     try:

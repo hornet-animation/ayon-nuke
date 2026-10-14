@@ -122,10 +122,11 @@ _QW_DEFAULTS = {
     # proxy) path lives on one of these blocks farm submission outright.
     # Comma/space separated letters; "" disables the check.
     "forbidden_read_drives": "C",
-    # Farm copy of the script: "off" = full copy as before, "log" = full copy
-    # plus a report of what would be stripped, "on" = only the nodes upstream
-    # of the submitted write (full copy kept beside it as *_full.nk).
-    "sanitize_render_script": "log",
+    # Farm copy of the script: "off" = full copy as before, "reads" = full
+    # copy minus Read nodes nothing depends on, "log" = full copy plus a
+    # report of what "on" would strip, "on" = only the nodes upstream of the
+    # submitted write (full copy kept beside it as *_full.nk).
+    "sanitize_render_script": "reads",
     # Warn before rendering/submitting a write set to more than rgba (e.g.
     # "all"). The warning's "don't warn me again" writes this False to the
     # user TOML; re-enable via Quick Write Defaults.
