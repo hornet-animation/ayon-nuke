@@ -1073,8 +1073,9 @@ def embedOptions():
     skip_popup.setValue(False)
     skip_popup.clearFlag(nuke.STARTLINE)
     skip_popup.setTooltip(
-        "Skip the Submission Settings popup and submit straight to Deadline "
-        "using the node's current settings."
+        "Skip the Submission Settings popup (Submit to Deadline) and the "
+        "Publish Settings popup (Quick Publish), and use the node's current "
+        "settings directly."
     )
 
     clear_temp_outputs_button = nuke.PyScript_Knob(
@@ -1638,6 +1639,55 @@ def on_priority_clamp():
 # Fall back to object when nukescripts is unavailable (headless import) so the
 # module still loads; the dialog is only ever instantiated in a GUI session.
 _PanelBase = nukescripts.PythonPanel if nukescripts else object
+
+
+class PublishSettingsDialog(_PanelBase):
+    """One-shot dialog shown before Quick Publish. Shows what is about to be
+    published and lets Review / Burnin / Farm be set for this publish only --
+    like SubmitSettingsDialog, nothing is written back to the node."""
+
+    def __init__(self, node, is_ovs=False):
+        nukescripts.PythonPanel.__init__(self, "Publish Settings")
+        self._node = node
+
+        try:
+            latest, _ = get_latest_publish_version(node)
+        except Exception:
+            latest = None
+        pf, pl = node.knob("publishFirst"), node.knob("publishLast")
+        rng = (
+            "{}-{}".format(int(pf.value()), int(pl.value()))
+            if pf is not None and pl is not None else "?"
+        )
+        summary = "<b>{}</b><br>publish range {}".format(node.name(), rng)
+        if is_ovs:
+            summary += "<br>OVS: version resolved from the frames on disk"
+        if latest is not None:
+            summary += "<br>latest published v{:03d}".format(int(latest))
+        self.addKnob(nuke.Text_Knob("summary", "", summary))
+        self.addKnob(nuke.Text_Knob("div", "", ""))
+
+        # Only offer the toggles the node actually has (prerenders have no
+        # review/burnin options).
+        self._toggles = {}
+        for knob_name, label in (
+            ("generate_review_media", "Generate Review Media"),
+            ("burnin", "Apply burnins to Review"),
+            ("publish_on_farm", "Publish on Farm"),
+        ):
+            source = node.knob(knob_name)
+            if source is None:
+                continue
+            box = nuke.Boolean_Knob(knob_name, label)
+            box.setValue(bool(source.value()))
+            box.setFlag(nuke.STARTLINE)
+            self.addKnob(box)
+            self._toggles[knob_name] = box
+
+    def option(self, knob_name):
+        """The dialog's value for a toggle (False if the node lacks it)."""
+        box = self._toggles.get(knob_name)
+        return bool(box.value()) if box is not None else False
 
 
 class SubmitSettingsDialog(_PanelBase):
@@ -2626,18 +2676,30 @@ def quick_publish_wrapper(node):
         print("Publish cancelled: target version already exists")
         return
 
-    review_knob = node.knobs().get("generate_review_media")
-    review = review_knob.value() if review_knob else False
+    skip = node.knob("skip_popup")
+    if (skip is not None and skip.value()) or nukescripts is None:
+        # No popup: publish with the node's own options, as before.
+        review_knob = node.knobs().get("generate_review_media")
+        review = review_knob.value() if review_knob else False
 
-    integrate_farm_knob = node.knobs().get("publish_on_farm")
-    integrate_farm = (
-        integrate_farm_knob.value() if integrate_farm_knob else False
-    )
+        integrate_farm_knob = node.knobs().get("publish_on_farm")
+        integrate_farm = (
+            integrate_farm_knob.value() if integrate_farm_knob else False
+        )
+
+        burnin_knob = node.knobs().get("burnin")
+        burnin = burnin_knob.value() if burnin_knob else False
+    else:
+        # One-shot Publish Settings popup: options for this publish only.
+        dialog = PublishSettingsDialog(node, is_ovs=is_ovs)
+        if not dialog.showModalDialog():
+            print(f"Publish cancelled by user on '{node.name()}'")
+            return
+        review = dialog.option("generate_review_media")
+        integrate_farm = dialog.option("publish_on_farm")
+        burnin = dialog.option("burnin")
     # review extraction follows the publish location
     review_farm = integrate_farm
-
-    burnin_knob = node.knobs().get("burnin")
-    burnin = burnin_knob.value() if burnin_knob else False
 
     _OVS_SYNC_SUSPENDED["active"] = True
     try:
