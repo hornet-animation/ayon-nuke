@@ -439,6 +439,127 @@ def _confirm_no_local_reads(node):
     return False
 
 
+# ---------------------------------------------------------------------------
+# Review media colorspace readout
+#
+# ExtractFFmpegReview (project settings > nuke > publish, set in the AYON web
+# UI) encodes one movie per matching profile. Each profile names an output
+# OCIO colorspace and a delivery tag; the input colorspace is the write's.
+# These helpers mirror the plugin's own filter logic so the panel can say up
+# front what review media a publish of this node will produce.
+# ---------------------------------------------------------------------------
+
+_TASK_TYPE_CACHE = {}
+
+
+def _current_task_type():
+    """The AYON task type of the current context (cached), or None."""
+    project = os.environ.get("AYON_PROJECT_NAME", "")
+    folder = os.environ.get("AYON_FOLDER_PATH", "")
+    task = os.environ.get("AYON_TASK_NAME", "")
+    key = (project, folder, task)
+    if key in _TASK_TYPE_CACHE:
+        return _TASK_TYPE_CACHE[key]
+    task_type = None
+    try:
+        import ayon_api
+
+        folder_entity = ayon_api.get_folder_by_path(project, folder)
+        if folder_entity:
+            task_entity = ayon_api.get_task_by_name(
+                project, folder_entity["id"], task
+            )
+            if task_entity:
+                task_type = task_entity.get("taskType")
+    except Exception as e:
+        log.debug(f"Could not resolve task type: {e}")
+    _TASK_TYPE_CACHE[key] = task_type
+    return task_type
+
+
+def _review_filters_match(settings, criteria):
+    """ExtractFFmpegReview's matcher: empty filter list = wildcard. An
+    unknown criterion (None) is treated as matching."""
+    for key, value in criteria.items():
+        filt = settings.get(key) or []
+        if filt and value is not None and value not in filt:
+            return False
+    return True
+
+
+def review_media_plan(node):
+    """What review media publishing `node` will produce, per AYON settings.
+
+    Returns (state, lines): state is "on", "off", "none" or "unknown"; lines
+    describe each matching profile as "name: input -> output (delivery,
+    codec.ext)".
+    """
+    try:
+        plugin = (
+            get_current_project_settings()
+            .get("nuke", {}).get("publish", {})
+            .get("ExtractFFmpegReview", {})
+        )
+    except Exception as e:
+        return "unknown", ["couldn't read AYON settings ({})".format(e)]
+    if not plugin.get("enabled", False):
+        return "off", ["ExtractFFmpegReview is disabled in AYON settings"]
+
+    try:
+        data = parse_publish_instance(node)
+    except Exception:
+        data = {}
+    criteria = {
+        "product_types": data.get("productType") or data.get("productBaseType"),
+        "hosts": "nuke",
+        "task_types": _current_task_type(),
+        "task_names": os.environ.get("AYON_TASK_NAME") or None,
+    }
+    if not _review_filters_match(plugin, criteria):
+        return "off", ["not generated for this node (AYON plugin filters)"]
+
+    profiles = [
+        p for p in plugin.get("profiles") or []
+        if _review_filters_match(p, criteria)
+    ]
+    if not profiles:
+        return "none", ["no review profile matches this node"]
+
+    interior = _find_interior_write(node)
+    cs_knob = interior.knob("colorspace") if interior is not None else None
+    source = cs_knob.value() if cs_knob is not None else "?"
+    lines = []
+    for p in profiles:
+        cs = p.get("colorspace") or {}
+        codec = p.get("codec") or {}
+        output = cs.get("output") or "{} (unchanged)".format(source)
+        delivery = cs.get("delivery") or "none"
+        lines.append("{}: {} -> {}  ({}, {}.{})".format(
+            p.get("name") or "profile", source, output, delivery,
+            codec.get("codec") or "?", codec.get("movie_ext") or "?",
+        ))
+    return "on", lines
+
+
+def review_colorspace_text(node):
+    """HTML for the panel / popup readout."""
+    state, lines = review_media_plan(node)
+    colour = {"on": "#3fb8b0", "off": "#808080",
+              "none": "#e0a040", "unknown": "#e0a040"}[state]
+    return "<font color='{}'>{}</font>".format(colour, "<br>".join(lines))
+
+
+def update_review_colorspace_display(node):
+    """Refresh the panel's Review media readout (best effort)."""
+    knob = node.knob("review_colorspace")
+    if knob is None:
+        return
+    try:
+        knob.setValue(review_colorspace_text(node))
+    except Exception as e:
+        log.debug(f"Review colorspace readout not updated: {e}")
+
+
 def _resolved_toml_paths():
     """(project_toml, user_toml) as they resolve right now."""
     try:
@@ -1322,6 +1443,18 @@ def embedOptions():
         group.addKnob(generate_review_checkbox)
         group.addKnob(burnin_checkbox)
 
+        # What the review media will be, from the AYON web UI settings.
+        review_cs = nuke.Text_Knob("review_colorspace", "Review media", "")
+        review_cs.setTooltip(
+            "From AYON project settings > nuke > publish > "
+            "ExtractFFmpegReview: one line per review profile that matches "
+            "this node -- input colorspace -> output OCIO colorspace "
+            "(delivery tagging, codec)."
+        )
+        review_cs.setFlag(nuke.STARTLINE)
+        group.addKnob(review_cs)
+        update_review_colorspace_display(group)
+
     # Spacer between the publish options and the action buttons.
     publish_buttons_gap = nuke.Text_Knob("publish_buttons_gap", " ", " ")
     publish_buttons_gap.setFlag(nuke.STARTLINE)
@@ -1689,6 +1822,11 @@ class PublishSettingsDialog(_PanelBase):
             summary += "<br>OVS: version resolved from the frames on disk"
         if latest is not None:
             summary += "<br>latest published v{:03d}".format(int(latest))
+        if node.knob("generate_review_media") is not None:
+            try:
+                summary += "<br><br>review media:<br>" + review_colorspace_text(node)
+            except Exception:
+                pass
         self.addKnob(nuke.Text_Knob("summary", "", summary))
         self.addKnob(nuke.Text_Knob("div", "", ""))
 
@@ -2840,6 +2978,8 @@ def refresh_deadline_callback():
             refresh_deadline_pools(node)
         except Exception as e:
             log.error(f"Error refreshing deadline pools: {e}")
+    elif knob.name() == "colorspace":
+        update_review_colorspace_display(node)
     elif knob.name() in ("deadlineGroup", "deadlineGroupFilter"):
         try:
             refresh_deadline_groups(node)
