@@ -711,13 +711,12 @@ def quick_node_data(family="render", variant="_Main", is_ovs=False):
         ayon_asset_name = folder_path.split("/")[-1]
     else:
         ayon_asset_name = folder_path
-    ayon_hierarchy = [p for p in folder_path.split("/")[:-1] if p]
-    if len(ayon_hierarchy) > 1:
-        ayon_hierarchy = "/".join(folder_path.split("/")[:-1])
-        ayon_parents = [p for p in folder_path.split('/')[:-1] if p] # splitting on / when the path starts with / gives us an empty [0]
-    else:
-        ayon_hierarchy = ayon_hierarchy[0]
-        ayon_parents = [ayon_hierarchy]
+    # Parent folders without empty parts: "/sequences/prepro/sh010" ->
+    # ["sequences", "prepro"]. hierarchy never carries a leading slash, at any
+    # depth -- it used to for 2+ levels, which made check_shot_context flag
+    # nodes whose stored hierarchy lacked it.
+    ayon_parents = [p for p in folder_path.split("/")[:-1] if p]
+    ayon_hierarchy = "/".join(ayon_parents)
 
     return {
         "subset": family + os.environ["AYON_TASK_NAME"] + variant,
@@ -2288,6 +2287,15 @@ def locate_obsolete_on_load():
         return
     try:
         was_modified = nuke.Root().modified()
+        try:
+            restored = restore_grey_tiles()
+            if restored:
+                nuke.tprint(
+                    "[hornet quick_write] restored the tile colour of {} "
+                    "grey Hornet write node(s)".format(restored)
+                )
+        except Exception as e:
+            log.warning(f"restore_grey_tiles failed: {e}")
         found = locate_obsolete_nodes(notify=False)
         if not was_modified:
             nuke.Root().setModified(False)
@@ -3043,7 +3051,7 @@ def check_shot_context(node):
     mismatched = []
     changes_details = []
     for key in ("folderPath", "hierarchy", "folder", "task"):
-        if data.get(key) != expected.get(key):
+        if not _context_value_equal(key, data.get(key), expected.get(key)):
             mismatched.append(key)
             changes_details.append(
                 f"  {key}: '{data.get(key)}' -> '{expected.get(key)}'"
@@ -3555,25 +3563,77 @@ def flag_foreign_shot(node):
     )
 
 
+def _context_value_equal(key, a, b):
+    """Shot-context field comparison that ignores leading/trailing slashes on
+    path-like fields (hierarchy, folderPath) -- older nodes store them
+    without the leading slash, newer ones with it."""
+    if key in ("folderPath", "hierarchy") and isinstance(a, str) and isinstance(b, str):
+        return a.strip("/") == b.strip("/")
+    return a == b
+
+
+def _creation_tile_color(node):
+    """The tile colour create_write_node gives this kind of Hornet write:
+    prerender colour, OVS pink, else the imageio Write tile_color setting
+    for its creator/product (red if none is set)."""
+    try:
+        data = parse_publish_instance(node)
+    except Exception:
+        data = {}
+    if data.get("productBaseType") == "prerender":
+        return PRERENDER_TILE_COLOR
+    if data.get("is_ovs"):
+        return lib.color_gui_to_int([255, 102, 204, 255])
+    rgba = [255, 0, 0, 255]
+    try:
+        imageio = lib.get_imageio_node_setting(
+            node_class="Write",
+            plugin_name=data.get("creator"),
+            product_name=data.get("productName"),
+        ) or {}
+        rgba = next(
+            (k[k["type"]] for k in imageio.get("knobs") or []
+             if "tile_color" in k["name"]),
+            rgba,
+        )
+    except Exception:
+        pass
+    rgba = [int(c * 255) if isinstance(c, float) else c for c in rgba]
+    return lib.color_gui_to_int(rgba)
+
+
 def clear_foreign_shot_flag(node):
-    """Remove the foreign-shot label prefix and restore the tile colour."""
+    """Remove the foreign-shot label prefix and restore the tile colour --
+    but only if the tile is still the foreign-shot orange we set. Accepting
+    the context fix on a node that was never flagged used to reset it to 0
+    (Nuke's default grey)."""
     label = node.knob("label")
     if label is not None and label.value().startswith(
         FOREIGN_SHOT_LABEL_PREFIX
     ):
         lines = label.value().split("\n")
         label.setValue("\n".join(lines[1:]))
-    if node.knob("tile_color") is not None:
+    tile = node.knob("tile_color")
+    if tile is not None and int(tile.value()) == FOREIGN_SHOT_TILE_COLOR:
+        tile.setValue(_creation_tile_color(node))
+
+
+def restore_grey_tiles():
+    """Give Hornet writes left grey (tile_color 0) by the old
+    clear_foreign_shot_flag their creation colour back. Returns the count."""
+    fixed = 0
+    for node in get_all_ayon_write_nodes():
+        tile = node.knob("tile_color")
+        if tile is None:
+            continue
         try:
-            is_prerender = (
-                parse_publish_instance(node).get("productBaseType")
-                == "prerender"
-            )
+            if int(tile.value()) != 0:
+                continue
+            tile.setValue(_creation_tile_color(node))
+            fixed += 1
         except Exception:
-            is_prerender = False
-        node["tile_color"].setValue(
-            PRERENDER_TILE_COLOR if is_prerender else 0
-        )
+            continue
+    return fixed
 
 
 _WORK_RENDERS_MARKER = "/renders/nuke/"
