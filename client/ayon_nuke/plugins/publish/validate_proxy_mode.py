@@ -1,6 +1,9 @@
 import pyblish
 import nuke
-from ayon_core.pipeline import PublishXmlValidationError
+from ayon_core.pipeline import (
+    PublishXmlValidationError,
+    OptionalPyblishPluginMixin,
+)
 
 
 class FixProxyMode(pyblish.api.Action):
@@ -17,20 +20,24 @@ class FixProxyMode(pyblish.api.Action):
         rootNode["proxy"].setValue(False)
 
 
-class ValidateProxyMode(pyblish.api.ContextPlugin):
+class ValidateProxyMode(
+    OptionalPyblishPluginMixin,
+    pyblish.api.ContextPlugin,
+):
     """Validate active proxy mode"""
 
     order = pyblish.api.ValidatorOrder
+    optional = False
     label = "Validate Proxy Mode"
     hosts = ["nuke"]
     actions = [FixProxyMode]
 
     settings_category = "nuke"
 
-    # def process(self, context):
     def process(self, instance):
+        if not self.is_active(instance.data):
+            return
 
-        
         
         rootNode = nuke.root()
         isProxy = rootNode["proxy"].value()

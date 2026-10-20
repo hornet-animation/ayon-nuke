@@ -1,30 +1,49 @@
+from dataclasses import dataclass
 import os
 
 import nuke
 
 import pyblish.util
 import pyblish.api
-from qtpy import QtWidgets
 
 from ayon_core import resources
 from ayon_core.pipeline import registered_host
 from ayon_core.pipeline.create import CreateContext
 
 
-def set_context_favorites(favorites=None):
+def render_single_frame(group_node: nuke.Node) -> None:
+    """Render a single frame for the given group node.
+
+    Args:
+        group_node (nuke.Node): The group node containing the write
+        node to render.
+    """
+    write_node = nuke.allNodes("Write", group=group_node)[0]
+    frame = int(write_node["first"].value())
+    nuke.execute(write_node.fullName(), frame, frame)
+
+
+@dataclass(frozen=True)
+class FavoriteDef:
+    name: str
+    path: str
+
+
+def set_context_favorites(favorites: list[FavoriteDef]) -> None:
     """Adding favorite folders to nuke's browser
 
-    Arguments:
-        favorites (dict): couples of {name:path}
+    Args:
+        favorites (list[FavoriteDef]): list of favorite definitions
+
     """
-    favorites = favorites or {}
     icon_path = resources.get_resource("icons", "folder-favorite.png")
-    for name, path in favorites.items():
+    for favorite in favorites:
         nuke.addFavoriteDir(
-            name,
-            path,
+            favorite.name,
+            favorite.path,
             nuke.IMAGE | nuke.SCRIPT | nuke.GEO,
-            icon=icon_path)
+            icon=icon_path
+        )
 
 
 def get_node_outputs(node):
@@ -43,7 +62,7 @@ def get_node_outputs(node):
 
 def is_node_gizmo(node) -> bool:
     """Return True if the node is a gizmo."""
-    return 'gizmo_file' in node.knobs()
+    return node.knob('gizmo_file') is not None
 
 
 def gizmo_is_nuke_default(gizmo) -> bool:
@@ -89,14 +108,6 @@ def bake_gizmos_recursively(in_group=None):
                     bake_gizmos_recursively(node)
 
 
-def is_headless() -> bool:
-    """
-    Returns:
-        bool: headless
-    """
-    return QtWidgets.QApplication.instance() is None
-
-
 def submit_render_on_farm(node):
     # Ensure code is executed in root context.
     if nuke.root() == nuke.thisNode():
@@ -125,9 +136,15 @@ def _submit_render_on_farm(node) -> bool:
     host = registered_host()
     create_context = CreateContext(host)
 
-    # Ensure CreateInstance is enabled.
+    # Ensure CreateInstance is enabled and renders on farm.
     for instance in create_context.instances:
-        instance.data["active"] = node is instance.transient_data["node"]
+        is_current_node = node is instance.transient_data["node"]
+
+        if not instance.is_mandatory:
+            instance.data["active"] = is_current_node
+
+        if is_current_node:
+            instance.data["creator_attributes"]["render_target"] = "farm"
 
     context = pyblish.api.Context()
     context.data["create_context"] = create_context

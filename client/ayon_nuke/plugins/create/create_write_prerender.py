@@ -28,7 +28,12 @@ class CreateWritePrerender(napi.NukeWriteCreator):
     order = 90
 
     def create_instance_node(
-            self, product_name, instance_data, staging_dir=None, node_selection=None):
+        self,
+        product_name,
+        instance_data,
+        staging_dir=None,
+        node_selection=None,
+    ):
         settings = self.project_settings["nuke"]["create"]
         settings = settings["CreateWritePrerender"]
 
@@ -77,12 +82,8 @@ class CreateWritePrerender(napi.NukeWriteCreator):
         if "use_range_limit" not in self.instance_attributes:
             return
 
-        write_node.begin()
-        for n in nuke.allNodes():
-            # get write node
-            if n.Class() in "Write":
-                w_node = n
-        write_node.end()
+        # get write node
+        w_node = nuke.allNodes(filter="Write", group=write_node)[-1]
 
         w_node["use_limit"].setValue(True)
         w_node["first"].setValue(nuke.root()["first_frame"].value())

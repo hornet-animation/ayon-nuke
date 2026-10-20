@@ -13,7 +13,7 @@ from ayon_nuke.api.lib import (
     get_avalon_knob_data,
     set_avalon_knob_data
 )
-from ayon_nuke.api.command import viewer_update_and_undo_stop
+from ayon_nuke.api.command import undo_chunk
 from ayon_nuke.api import containerise, update_container
 
 
@@ -34,6 +34,7 @@ class LoadBackdropNodes(load.LoaderPlugin):
     node_color = "0x7533c1ff"
     remove_nodes_from_backdrop = False
 
+    @undo_chunk("Import Backdrop")
     def load(self, context, name, namespace, data):
         """
         Loading function to import .nk file into script and wrap
@@ -78,7 +79,8 @@ class LoadBackdropNodes(load.LoaderPlugin):
 
         with maintained_selection():
             # Get mouse position
-            reset_selection()  # clear selection first to avoid automatic connections to selection
+            # clear selection first to avoid automatic connections to selection
+            reset_selection()
             n = nuke.createNode("NoOp")
             xcursor, ycursor = (n.xpos(), n.ypos())
             nuke.delete(n)
@@ -157,6 +159,7 @@ class LoadBackdropNodes(load.LoaderPlugin):
                 loader=self.__class__.__name__,
                 data=data_imprint)
 
+    @undo_chunk("Update Backdrop")
     def update(self, container, context):
         """Update the Loader's path
 
@@ -188,6 +191,7 @@ class LoadBackdropNodes(load.LoaderPlugin):
             "representation": repre_entity["id"],
             "version": version_entity["version"],
             "colorspaceInput": colorspace,
+            "project_name": project_name,
         }
 
         for k in ["source", "fps"]:
@@ -239,13 +243,13 @@ class LoadBackdropNodes(load.LoaderPlugin):
     def switch(self, container, context):
         self.update(container, context)
 
+    @undo_chunk("Remove Backdrop")
     def remove(self, container):
         node = container["node"]
-        with viewer_update_and_undo_stop():
-            if self.remove_nodes_from_backdrop:
-                for child_node in get_backdrop_nodes(node):
-                    nuke.delete(child_node)
-            nuke.delete(node)
+        if self.remove_nodes_from_backdrop:
+            for child_node in get_backdrop_nodes(node):
+                nuke.delete(child_node)
+        nuke.delete(node)
 
     def set_autobackdrop(self, xpos, ypos, object_name, bdn_frame=50):
         """Set auto backdrop around selected nodes
@@ -254,7 +258,8 @@ class LoadBackdropNodes(load.LoaderPlugin):
             xpos (int): x position
             ypos (int): y position
             object_name (str): name of the object
-            bdn_frame (int, optional): frame size around the backdrop. Defaults to 50.
+            bdn_frame (int, optional): frame size around the backdrop.
+                                       Defaults to 50.
 
         Returns:
             nuke.BackdropNode: the created backdrop node
@@ -301,7 +306,8 @@ def _restore_connection(conn, node_map):
     """Restore a single node connection or expression.
 
     Args:
-        conn (dict): Connection dictionary with serialized node names and metadata.
+        conn (dict): Connection dictionary with serialized
+            node names and metadata.
         node_map (dict): Mapping of node names to actual node objects.
     """
     if "input_node_name" in conn:
@@ -348,7 +354,8 @@ def _capture_node_connections(backdrop_nodes):
     when nodes are deleted and recreated.
 
     Args:
-        backdrop_nodes (list): List of nodes to capture external connections for.
+        backdrop_nodes (list): List of nodes to capture
+            external connections for.
 
     Returns:
         list: List of connection dictionaries with serialized node names.

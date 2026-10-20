@@ -1,9 +1,10 @@
 import os
 
-import nuke
 import pyblish.api
 from ayon_core.pipeline import publish
 from ayon_nuke import api as napi
+
+import nuke  # noqa
 
 
 class CollectNukeWrites(
@@ -29,6 +30,13 @@ class CollectNukeWrites(
         if instance.data.get("stagingDir_persistent") is None:
             instance.data["stagingDir_persistent"] = True
 
+        # add slate family to instance.data["families"]
+        if (
+            instance.data.get("slate_gen")
+            and "slate" not in instance.data["families"]
+        ):
+            instance.data["families"].append("slate")
+
         group_node = instance.data["transientData"]["node"]
 
         render_target = instance.data["render_target"]
@@ -48,7 +56,7 @@ class CollectNukeWrites(
             self._set_existing_files_data(instance, colorspace)
 
         elif render_target == "frames_farm":
-            collected_frames = self._set_existing_files_data(instance, colorspace)
+            collected_frames = self._get_collected_frames(instance)
 
             self._set_expected_files(instance, collected_frames)
 
@@ -108,9 +116,12 @@ class CollectNukeWrites(
         write_file_path = nuke.filename(write_node)
         output_dir = os.path.dirname(write_file_path)
 
-        instance.data["expectedFiles"] = [
-            os.path.join(output_dir, source_file) for source_file in collected_frames
+        expected_files = [
+            os.path.join(output_dir, source_file)
+            for source_file in collected_frames
         ]
+
+        instance.data["expectedFiles"] = expected_files
 
     def _get_frame_range_data(self, instance):
         """Get frame range data from instance.
@@ -194,7 +205,8 @@ class CollectNukeWrites(
         write_node = self._write_node_helper(instance)
         if instance.data.get("stagingDir_is_custom", False):
             self.log.info(
-                "Custom staging dir detected. Syncing write nodes output path."
+                "Custom staging dir detected. "
+                "Syncing write nodes output path."
             )
             napi.lib.writes_version_sync(write_node, self.log)
 
@@ -386,6 +398,8 @@ class CollectNukeWrites(
         collected_frames = self._add_slate_frame_to_collected_frames(
             instance, collected_frames, first_frame
         )
+        if instance.data.get("slate_gen"):
+            representation["tags"].append("slate-frame")
 
         if len(collected_frames) == 1:
             # Index, don't pop(): this is the same list object that
@@ -432,7 +446,16 @@ class CollectNukeWrites(
         expected_slate_frame = first_frame - 1
         expected_slate_path = write_node["file"].evaluate(expected_slate_frame)
 
-        if not os.path.exists(expected_slate_path):
+        if (
+            os.path.exists(expected_slate_path)
+            or (
+                # When submitting to farm using existing frames on disk
+                # and slate generation is enabled then ensure to add
+                # the slate frame even though it may not exist yet
+                instance.data["render_target"] == "frames_farm"
+                and instance.data.get("slate_gen")
+            )
+        ):
             slate_frame = os.path.basename(expected_slate_path)
             collected_frames.insert(0, slate_frame)
 
@@ -458,6 +481,13 @@ class CollectNukeWrites(
             }
         )
         self.log.info("Farm rendering ON ...")
+
+        if instance.data.get("slate_gen"):
+            write_node = self._write_node_helper(instance)
+            slate_representation_ext = instance.data.setdefault(
+                "slateRepresentationExt", [])
+            slate_representation_ext.append(
+                write_node["file_type"].value())
 
     def _get_collected_frames(self, instance):
         """Get collected frames.
@@ -511,13 +541,14 @@ class CollectNukeWrites(
             self.log.warning(f"Output directory does not exist: {output_dir}")
             collected_frames = []
 
-        return collected_frames
-
+        # set slate frame
+        return self._add_slate_frame_to_collected_frames(
+            instance,
+            collected_frames,
+            first_frame
+        )
 
 def _find_downstream_time_warp_node(start_node):
-    # HACK: no idea why calling `dependentNodes` the first time
-    # seems to always return nothing.
-    nuke.dependentNodes(nuke.INPUTS, [start_node])
-    for node in nuke.dependentNodes(nuke.INPUTS, [start_node]):
+    for node in start_node.dependent(nuke.INPUTS, forceEvaluate=False):
         if node.Class() == "TimeWarp":
             return node

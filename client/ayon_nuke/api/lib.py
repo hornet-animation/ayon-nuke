@@ -16,13 +16,17 @@ from qtpy import QtCore, QtWidgets
 import ayon_api
 
 from ayon_core.host import HostDirmap
-from ayon_core.pipeline.workfile.workfile_template_builder import (
-    TemplateProfileNotFound
-)
+
 from ayon_core.lib import (
     env_value_to_bool,
     Logger,
     StringTemplate,
+    BoolDef,
+    UILabelDef,
+)
+
+from ayon_core.tools.attribute_defs.dialog import (
+    AttributeDefinitionsDialog
 )
 
 from ayon_core.settings import (
@@ -45,7 +49,9 @@ from ayon_core.pipeline import (
     AVALON_INSTANCE_ID,
     get_current_context,
 )
+from ayon_core.pipeline.create import CreateContext
 from ayon_core.pipeline.load import filter_containers
+
 from ayon_core.pipeline.colorspace import (
     get_current_context_imageio_config_preset
 )
@@ -59,7 +65,10 @@ from .constants import (
 
 from .utils import get_node_outputs
 
-from .colorspace import get_formatted_display_and_view
+from .colorspace import (
+    get_formatted_display_and_view,
+    create_viewer_profile_string,
+)
 
 import pathlib
 
@@ -132,9 +141,6 @@ class Context:
     workfiles_launched = False
     workfiles_tool_timer = None
 
-    # Seems unused
-    _project_entity = None
-
 
 def get_main_window():
     """Acquire Nuke's main window"""
@@ -164,7 +170,7 @@ def set_node_data(node, knob_name, data):
         data (dict): data to be stored in knob
     """
     # if exists then update data
-    if knob_name in node.knobs():
+    if node.knob(knob_name) is not None:
         update_node_data(node, knob_name, data)
         return
 
@@ -186,10 +192,11 @@ def get_node_data(node, knob_name):
     Returns:
         dict: data stored in knob
     """
-    if knob_name not in node.knobs():
+    knob = node.knob(knob_name)
+    if knob is None:
         return {}
 
-    rawdata = node[knob_name].getValue()
+    rawdata = knob.getValue()
     if (
         isinstance(rawdata, str)
         and rawdata.startswith(JSON_PREFIX)
@@ -242,12 +249,6 @@ class Knobby(object):
         for flag in self.flags:
             knob.setFlag(flag)
         return knob
-
-    @staticmethod
-    def nice_naming(key):
-        """Convert camelCase name into UI Display Name"""
-        words = re.findall('[A-Z][^A-Z]*', key[0].upper() + key[1:])
-        return " ".join(words)
 
 
 def create_knobs(data, tab=None):
@@ -400,8 +401,9 @@ def imprint(node, data, tab=None):
         # If knob name exists we set the value. Technically there could be
         # multiple knobs with the same name, but the intent is not to have
         # duplicated knobs so we do not account for that.
-        if knob.name() in node.knobs().keys():
-            node[knob.name()].setValue(knob.value())
+        existing_knob = node.knob(knob.name())
+        if existing_knob is not None:
+            existing_knob.setValue(knob.value())
         else:
             node.addKnob(knob)
 
@@ -430,6 +432,14 @@ def set_avalon_knob_data(node, data=None, prefix="avalon:"):
     """
     data = data or dict()
     create = OrderedDict()
+
+    # remove node key from container data before
+    # setting it into the node's avalon knob
+    data = {
+        key: value
+        for key, value in data.items()
+        if key not in ("node", "objectName")
+    }
 
     tab_name = NODE_TAB_NAME
     editable = ["folderPath", "productName", "name", "namespace"]
@@ -488,7 +498,7 @@ def get_avalon_knob_data(node, prefix="avalon:", create=True):
     """
 
     data = {}
-    if NODE_TAB_NAME not in node.knobs():
+    if node.knob(NODE_TAB_NAME) is None:
         return data
 
     # check if lists
@@ -819,28 +829,41 @@ def get_view_process_node():
         return duplicate_node(ipn_node)
 
 
-def on_script_load():
-    """Callback for ffmpeg support"""
-    if nuke.env["LINUX"]:
-        nuke.tcl('load ffmpegReader')
-        nuke.tcl('load ffmpegWriter')
-    else:
-        nuke.tcl('load movReader')
-        nuke.tcl('load movWriter')
-
-
-def check_inventory_versions():
+def check_inventory_versions(show_popup=False):
     """Update loaded container nodes' colors based on version state.
 
     This will group containers by their version to outdated, not found,
     invalid or latest and colorize the nodes based on the category.
     """
+    if not nuke.GUI:
+        return
+
+    # Collect and filter the containers only once, because it requires
+    # iterating all nodes in the script and querying the server.
     try:
         host = registered_host()
         containers = host.get_containers()
         project_name = get_current_project_name()
 
         filtered_containers = filter_containers(containers, project_name)
+    except Exception as error:
+        log.warning(error, exc_info=True)
+        return
+
+    if show_popup:
+        try:
+            # Match `any_outdated_containers` which ignores locked versions
+            if any(
+                container.get("version_locked") is not True
+                for container in filtered_containers.outdated
+            ):
+                log.warning("Scene has outdated content.")
+                _show_outdated_content_popup()
+        except Exception as error:
+            log.warning(error, exc_info=True)
+
+    # Colorize nodes
+    try:
         for category, containers in filtered_containers._asdict().items():
             if category not in LOADER_CATEGORY_COLORS:
                 continue
@@ -850,6 +873,29 @@ def check_inventory_versions():
                 container["node"]["tile_color"].setValue(color)
     except Exception as error:
         log.warning(error)
+
+
+def _show_outdated_content_popup():
+    # Get main window
+    parent = get_main_window()
+    if parent is None:
+        log.info("Skipping outdated content pop-up "
+                 "because Nuke window can't be found.")
+        return
+
+    from ayon_core.tools.utils import SimplePopup
+
+    # Show outdated pop-up
+    def _on_show_inventory():
+        from ayon_core.tools.utils import host_tools
+        host_tools.show_scene_inventory(parent=parent)
+
+    dialog = SimplePopup(parent=parent)
+    dialog.setWindowTitle("Nuke scene has outdated content")
+    dialog.set_message("There are outdated containers in "
+                      "your Nuke scene.")
+    dialog.on_clicked.connect(_on_show_inventory)
+    dialog.show()
 
 
 def writes_version_sync(write_node, log):
@@ -979,7 +1025,11 @@ def get_work_default_directory(data):
         "frame": "#" * frame_padding,
     })
 
-    work_default_dir_template = anatomy.get_template_item("work", "default", "directory")
+    work_default_dir_template = anatomy.get_template_item(
+        "work",
+        "default",
+        "directory"
+    )
     normalized_dir = work_default_dir_template.format_strict(data).normalized()
     return str(normalized_dir).replace("\\", "/")
 
@@ -991,6 +1041,24 @@ def script_name() -> str:
 # submit a local render but also save script like a submission
 # def add_button_render(node):
 
+
+
+def add_button_render_single_image(node: nuke.Node) -> None:
+    """Add a button to render a single image for the given node.
+
+    Args:
+        node (nuke.Node): The node for which the render single image
+        button is being added.
+    """
+    name = "Render"
+    label = "Render Local"
+    value = (
+        "from ayon_nuke.api.utils import render_single_frame;"
+        "render_single_frame(nuke.thisNode())"
+    )
+    knob = nuke.PyScript_Knob(name, label, value)
+    knob.clearFlag(nuke.STARTLINE)
+    node.addKnob(knob)
 
 
 def add_button_render_on_farm(node):
@@ -1306,6 +1374,10 @@ def create_write_node(
             if "___" in _k_name:
                 # add divider
                 GN.addKnob(nuke.Text_Knob(""))
+
+            elif  _k_name == "Render" and plugin_name == "CreateWriteImage":
+                add_button_render_single_image(GN)
+
             else:
                 # add linked knob by _k_name
                 link = nuke.Link_Knob("")
@@ -1566,21 +1638,23 @@ class WorkfileSettings(object):
     to Root node or to any given node.
 
     Arguments:
-        root (node): nuke's root node
-        nodes (list): list of nuke's nodes
-        nodes_filter (list): filtering classes for nodes
+        root_node (nuke.Node): nuke's root node
+        project_settings (dict): project settings, queried if not provided
+        project (dict): project entity, current project if not provided
 
     """
 
-    def __init__(self, root_node=None, nodes=None, **kwargs):
+    def __init__(
+            self,
+            root_node=None,
+            project_settings=None,
+            **kwargs):
         project_entity = kwargs.get("project")
         if project_entity is None:
             project_name = get_current_project_name()
-            project_entity = ayon_api.get_project(project_name)
         else:
             project_name = project_entity["name"]
 
-        Context._project_entity = project_entity
         self._project_name = project_name
         self._folder_path = get_current_folder_path()
         self._folder_entity = ayon_api.get_folder_by_path(
@@ -1595,27 +1669,23 @@ class WorkfileSettings(object):
             self._task_name
         )
         self._root_node = root_node or nuke.root()
-        self._nodes = self.get_nodes(nodes=nodes)
 
         context_data = get_template_data_with_names(
             project_name, self._folder_path, self._task_name, "nuke"
         )
         self.formatting_data = context_data
+        self._project_setting = project_settings
 
-    def get_nodes(self, nodes=None, nodes_filter=None):
+    @property
+    def project_settings(self) -> dict:
+        """Get project settings
 
-        if not isinstance(nodes, list) and not isinstance(nodes_filter, list):
-            return [n for n in nuke.allNodes()]
-        elif not isinstance(nodes, list) and isinstance(nodes_filter, list):
-            nodes = list()
-            for filter in nodes_filter:
-                [nodes.append(n) for n in nuke.allNodes(filter=filter)]
-            return nodes
-        elif isinstance(nodes, list) and not isinstance(nodes_filter, list):
-            return [n for n in self._nodes]
-        elif isinstance(nodes, list) and isinstance(nodes_filter, list):
-            for filter in nodes_filter:
-                return [n for n in self._nodes if filter in n.Class()]
+        Returns:
+            dict: project settings for the current project
+        """
+        if not self._project_setting:
+            self._project_setting = get_project_settings(self._project_name)
+        return self._project_setting
 
     # TODO: move into ./colorspace.py
     def set_viewers_colorspace(self, imageio_nuke):
@@ -1656,7 +1726,7 @@ class WorkfileSettings(object):
             if viewer_process != v["viewerProcess"].value():
                 copy_inputs = v.dependencies()
                 copy_knobs = {
-                    knob_name: knob.value()
+                    knob_name: knob.toScript()
                     for knob_name, knob in v.knobs().items()
                     if knob_name not in filter_knobs
                 }
@@ -1674,7 +1744,14 @@ class WorkfileSettings(object):
 
                 # set copied knobs
                 for knob_name, knob_value in copy_knobs.items():
-                    nv[knob_name].setValue(knob_value)
+                    try:
+                        nv[knob_name].fromScript(knob_value)
+                    except Exception as e:
+                        log.warning(
+                            f"Failed to set knob '{knob_name}' with script "
+                            f"'{knob_value}' on new viewer node "
+                            f"'{nv['name'].value()}': {e}"
+                        )
 
                 # set viewerProcess
                 nv["viewerProcess"].setValue(viewer_process)
@@ -1694,7 +1771,9 @@ class WorkfileSettings(object):
             imageio_host (dict): host colorspace configurations
 
         """
-        config_data = get_current_context_imageio_config_preset()
+        config_data = get_current_context_imageio_config_preset(
+            project_settings=self.project_settings
+        )
 
         workfile_settings = imageio_host["workfile"]
         color_management = workfile_settings["color_management"]
@@ -1778,23 +1857,12 @@ class WorkfileSettings(object):
         m_display, m_viewer = get_viewer_config_from_string(monitor_lut)
         v_display, v_viewer = get_viewer_config_from_string(viewer_lut)
 
-        # set monitor lut differently for nuke version 14
-        if nuke.NUKE_VERSION_MAJOR >= 14:
-            output_data["monitorOutLUT"] = create_viewer_profile_string(
-                m_viewer, m_display, path_like=False)
-            # monitorLut=thumbnails - viewerProcess makes more sense
-            output_data["monitorLut"] = create_viewer_profile_string(
-                v_viewer, v_display, path_like=False)
-
-        if nuke.NUKE_VERSION_MAJOR == 13:
-            output_data["monitorOutLUT"] = create_viewer_profile_string(
-                m_viewer, m_display, path_like=False)
-            # monitorLut=thumbnails - viewerProcess makes more sense
-            output_data["monitorLut"] = create_viewer_profile_string(
-                v_viewer, v_display, path_like=True)
-        if nuke.NUKE_VERSION_MAJOR <= 12:
-            output_data["monitorLut"] = create_viewer_profile_string(
-                m_viewer, m_display, path_like=True)
+        # set monitor lut differently (supported for nuke 14+)
+        output_data["monitorOutLUT"] = create_viewer_profile_string(
+            m_viewer, m_display, path_like=False)
+        # monitorLut=thumbnails - viewerProcess makes more sense
+        output_data["monitorLut"] = create_viewer_profile_string(
+            v_viewer, v_display, path_like=False)
 
         return output_data
 
@@ -1980,22 +2048,11 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
 
             nuke_imageio_writes = None
             if avalon_knob_data:
-                # establish families
-                product_base_type = (
-                    avalon_knob_data.get("productBaseType")
-                    or avalon_knob_data.get("productType")
-                )
                 # this shouldn't happen anymore, only with very old data
                 # and should be removed later when all avalon data api is
                 # also removed.
-                if product_base_type is None:
-                    product_base_type = avalon_knob_data["family"]
-                families = [product_base_type]
-                if avalon_knob_data.get("families"):
-                    families.append(avalon_knob_data.get("families"))
-
                 nuke_imageio_writes = get_imageio_node_setting(
-                    node_class=avalon_knob_data["families"],
+                    node_class="Write",
                     plugin_name=avalon_knob_data["creator"],
                     product_name=avalon_knob_data["productName"]
                 )
@@ -2003,25 +2060,39 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
                 nuke_imageio_writes = get_write_node_template_attr(node)
 
             if not nuke_imageio_writes:
-                return
+                continue
 
-            write_node = None
-
-            # get into the group node
-            node.begin()
-            for x in nuke.allNodes():
-                if x.Class() == "Write":
-                    write_node = x
-            node.end()
-            if not write_node:
+            # get write node from inside the group node
+            write_nodes = nuke.allNodes(filter="Write", group=node)
+            if not write_nodes:
                 return
-            #if write_node.knob('file_type').value() and len(write_node.knob('file_type').value()) > 1:
-            #    nuke_imageio_writes["knobs"][knob_index]["file_type"] = write_node.knob('file_type').value()
-            #else:
-            #    write_node.knob('file_type').setValue("exr")
-            #    nuke_imageio_writes["knobs"][knob_index]["file_type"] = "exr"
-            set_node_knobs_from_settings(
-                write_node, nuke_imageio_writes["knobs"])
+            write_node = write_nodes[-1]
+
+            # Exclude exposed knobs from colorspace nodes.
+            # This ensures that any values overwritten by the user is
+            # not changed by the colorspace knobs set.
+            colorspace_knobs = nuke_imageio_writes["knobs"]
+            if node_data:
+                # Legacy avalon knob data has no `creator_identifier` to
+                # find the creator settings (and its exposed knobs) by.
+                all_create_settings = self.project_settings["nuke"]["create"]
+                plugin_names_mapping = {
+                    "create_write_image": "CreateWriteImage",
+                    "create_write_prerender": "CreateWritePrerender",
+                    "create_write_render": "CreateWriteRender"
+                }
+                identifier = node_data["creator_identifier"]
+                creator_settings = all_create_settings[
+                    plugin_names_mapping[identifier]
+                ]
+                exposed_knobs = creator_settings.get("exposed_knobs")
+                if exposed_knobs:
+                    colorspace_knobs = [
+                        entry for entry in colorspace_knobs
+                        if entry["name"] not in exposed_knobs
+                    ]
+
+            set_node_knobs_from_settings(write_node, colorspace_knobs)
 
     # TODO: move into ./colorspace.py
     def set_reads_colorspace(self, read_clrs_inputs: list[dict[str, str]]):
@@ -2055,13 +2126,43 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
                     }
 
         if changes:
-            msg = "Read nodes are not set to correct colorspace:\n\n"
-            for node_name, knobs in changes.items():
-                msg += (
-                    " - node: '{0}' is now '{1}' but should be '{2}'\n"
-                ).format(node_name, knobs["from"], knobs["to"])
+            # Limit items shown in the UI
+            # to avoid display issues with long lists.
+            MAX_ITEMS = 10
 
-            msg += "\nWould you like to change it?"
+            items = list(changes.items())
+            details = []
+
+            msg = (
+                "Read node is not set to the correct colorspace:\n\n"
+                if len(items) == 1
+                else "Read nodes are not set to the correct colorspace:\n\n"
+            )
+
+            for i, (node_name, knobs) in enumerate(items):
+                line = (
+                    f" - node: '{node_name}' is now '{knobs['from']}' "
+                    f"but should be '{knobs['to']}'"
+                )
+                details.append(line)
+
+                if i < MAX_ITEMS:
+                    msg += line + "\n"
+
+            remaining = len(items) - MAX_ITEMS
+            if remaining > 0:
+                print("\n".join(details))
+                msg += (
+                    f"\n...and {remaining} more "
+                    f"{'node' if remaining == 1 else 'nodes'}.\n"
+                    "\nA detailed list has been printed to the Script Editor."
+                )
+
+            msg += (
+                "\n\nWould you like to change it?"
+                if len(items) == 1
+                else "\n\nWould you like to change them?"
+            )
 
             if nuke.ask(msg):
                 for node_name, knobs in changes.items():
@@ -2158,8 +2259,6 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
         frame_range = '{0}-{1}'.format(frame_start, frame_end)
 
         for node in nuke.allNodes(filter="Viewer"):
-            node['frame_range'].setValue(frame_range)
-            node['frame_range_lock'].setValue(True)
             node['frame_range'].setValue(frame_range)
             node['frame_range_lock'].setValue(True)
 
@@ -2261,15 +2360,14 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
         self.set_colorspace()
 
     def set_favorites(self):
-        from .utils import set_context_favorites
+        from .utils import set_context_favorites, FavoriteDef
 
         work_dir = os.getenv("AYON_WORKDIR")
         # TODO validate functionality
         # - does expect the structure is '{root}/{project}/{folder}'
-        # - this used asset name expecting it is unique in project
+        # - this used folder name expecting it is unique in project
         folder_path = get_current_folder_path()
         folder_name = folder_path.split("/")[-1]
-        favorite_items = OrderedDict()
 
         # project
         # get project's root and split to parts
@@ -2277,20 +2375,20 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
             Context.project_name)[0])
         # add project name
         project_dir = os.path.join(projects_root, Context.project_name) + "/"
-        # add to favorites
-        favorite_items.update({"Project dir": project_dir.replace("\\", "/")})
 
         # folder
-        folder_root = os.path.normpath(work_dir.split(
-            folder_name)[0])
+        folder_root = os.path.normpath(work_dir.split(folder_name)[0])
         # add folder name
         folder_dir = os.path.join(folder_root, folder_name) + "/"
-        # add to favorites
-        favorite_items.update({"Shot dir": folder_dir.replace("\\", "/")})
 
         # workdir
-        favorite_items.update({"Work dir": work_dir.replace("\\", "/")})
-
+        favorite_items = [
+            FavoriteDef(
+                "Project dir", project_dir.replace("\\", "/")
+            ),
+            FavoriteDef("Shot dir", folder_dir.replace("\\", "/")),
+            FavoriteDef("Work dir", work_dir.replace("\\", "/")),
+        ]
         set_context_favorites(favorite_items)
 
 
@@ -2322,6 +2420,8 @@ def get_dependent_nodes(nodes):
     """Get all dependent nodes connected to the list of nodes.
 
     Looking for connections outside the nodes in incoming argument.
+    This only checks for direct connections (nuke.INPUTS). It ignores others,
+    like hidden links (nuke.HIDDEN_INPUTS) and expressions (nuke.EXPRESSIONS).
 
     Arguments:
         nodes (list): list of nuke.Node objects
@@ -2333,24 +2433,28 @@ def get_dependent_nodes(nodes):
 
     connections_in = dict()
     connections_out = dict()
-    node_names = [n.name() for n in nodes]
+    node_names: set[str] = {n.name() for n in nodes}
     for node in nodes:
-        inputs = node.dependencies()
-        outputs = node.dependent()
         # collect all inputs outside
-        test_in = [(i, n) for i, n in enumerate(inputs)
-                   if n.name() not in node_names]
+        inputs = node.dependencies(nuke.INPUTS)
+        test_in = [
+            (i, input_) for i, input_ in enumerate(inputs)
+            if input_.name() not in node_names
+        ]
         if test_in:
-            connections_in.update({
-                node: test_in
-            })
-        # collect all outputs outside
-        test_out = [i for i in outputs if i.name() not in node_names]
+            connections_in[node] = test_in
+
+        # collect last connected output; only one dependent node is allowed
+        outputs = node.dependent(nuke.INPUTS, forceEvaluate=False)
+        test_out = next(
+            (
+                output for output in reversed(outputs)
+                if output.name() not in node_names
+            ),
+            None
+        )
         if test_out:
-            # only one dependent node is allowed
-            connections_out.update({
-                node: test_out[-1]
-            })
+            connections_out[node] = test_out
 
     return connections_in, connections_out
 
@@ -2396,24 +2500,29 @@ def find_free_space_to_paste_nodes(
     group_ypos = list()
 
     # get local coordinates of all nodes
-    nodes_xpos = [n.xpos() for n in nodes] + \
-                 [n.xpos() + n.screenWidth() for n in nodes]
-
-    nodes_ypos = [n.ypos() for n in nodes] + \
-                 [n.ypos() + n.screenHeight() for n in nodes]
+    nodes_xpos = list()
+    nodes_ypos = list()
+    for node in nodes:
+        xpos = node.xpos()
+        ypos = node.ypos()
+        nodes_xpos.extend((xpos, xpos + node.screenWidth()))
+        nodes_ypos.extend((ypos, ypos + node.screenHeight()))
 
     # get complete screen size of all nodes to be placed in
     nodes_screen_width = max(nodes_xpos) - min(nodes_xpos)
     nodes_screen_heigth = max(nodes_ypos) - min(nodes_ypos)
 
     # get screen size (r,l,t,b) of all nodes in `group`
+    # use a set to exclude the nodes with a fast lookup
+    exclude_nodes = set(nodes)
     with group:
-        group_xpos = [n.xpos() for n in nuke.allNodes() if n not in nodes] + \
-                     [n.xpos() + n.screenWidth() for n in nuke.allNodes()
-                      if n not in nodes]
-        group_ypos = [n.ypos() for n in nuke.allNodes() if n not in nodes] + \
-                     [n.ypos() + n.screenHeight() for n in nuke.allNodes()
-                      if n not in nodes]
+        for node in nuke.allNodes():
+            if node in exclude_nodes:
+                continue
+            xpos = node.xpos()
+            ypos = node.ypos()
+            group_xpos.extend((xpos, xpos + node.screenWidth()))
+            group_ypos.extend((ypos, ypos + node.screenHeight()))
 
         if len(group_xpos) == 0:
             group_xpos = [0]
@@ -2471,9 +2580,13 @@ def maintained_selection(exclude_nodes=None):
         # unselect all selection in case there is some
         reset_selection()
 
-        # and select all previously selected nodes
-        if previous_selection:
-            select_nodes(previous_selection)
+        for node in previous_selection:
+            try:
+                node["selected"].setValue(True)
+            except ValueError:
+                # Could fail if a node was deleted during the context.
+                # See: https://github.com/ynput/ayon-nuke/pull/331 for details.
+                pass
 
 
 @contextlib.contextmanager
@@ -2604,20 +2717,113 @@ def _launch_workfile_app():
     host_tools.show_workfiles(parent=None, on_top=True)
 
 
-def start_workfile_template_builder():
-    from .workfile_template_builder import (
-        build_workfile_template
-    )
+def update_content_on_context_change():
+    """Update creator instances when the current folder/task changes."""
+    host = registered_host()
+    create_context = CreateContext(host, discover_publish_plugins=False)
 
-    # remove callback since it would be duplicating the workfile
-    nuke.removeOnCreate(start_workfile_template_builder, nodeClass="Root")
+    project_entity = create_context.get_current_project_entity()
+    folder_entity = create_context.get_current_folder_entity()
+    task_entity = create_context.get_current_task_entity()
 
-    # to avoid looping of the callback, remove it!
-    log.info("Starting workfile template builder...")
+    current_folder_path = folder_entity["path"]
+    current_task = task_entity["name"]
+
+    project_name = project_entity["name"]
+    host_name = create_context.host_name
+
+    _changed = False
+
+    for instance in create_context.instances:
+        if instance.creator_identifier == "workfile":
+            continue
+
+        if (
+            instance.get("folderPath") == current_folder_path
+            and instance.get("task") == current_task
+        ):
+            continue
+
+        creator = create_context.creators[instance.creator_identifier]
+
+        product_name = creator.get_product_name(
+            project_name=project_name,
+            project_entity=project_entity,
+            folder_entity=folder_entity,
+            task_entity=task_entity,
+            variant=instance.get("variant"),
+            host_name=host_name,
+        )
+
+        instance["folderPath"] = current_folder_path
+        instance["task"] = current_task
+        instance["productName"] = product_name
+
+        _changed = True
+
+    if _changed:
+        create_context.save_changes()
+
+
+def prompt_reset_context():
+    """Prompt the user what context settings to reset.
+    This prompt is used on saving to a different task to allow the scene to
+    get matched to the new context.
+    """
+    definitions = [
+        UILabelDef(
+            label=(
+                "You are saving your workfile into a different folder or task."
+                "\n\n"
+                "Would you like to update some settings to the new context?\n"
+            )
+        ),
+        BoolDef(
+            "resolution",
+            label="Resolution",
+            tooltip="Reset workfile resolution",
+            default=True
+        ),
+        BoolDef(
+            "frame_range_fps",
+            label="Frame Range / FPS",
+            tooltip="Reset workfile start/end frame ranges and fps",
+            default=True
+        ),
+        BoolDef(
+            "colorspace",
+            label="Colorspace",
+            tooltip="Reset workfile colorspace",
+            default=True
+        ),
+        BoolDef(
+            "instances",
+            label="Publish instances",
+            tooltip="Update all publish instance's folder and task to match "
+                    "the new folder and task",
+            default=True
+        ),
+    ]
+
+    dialog = AttributeDefinitionsDialog(definitions)
+    dialog.setWindowTitle("Saving to different context.")
     try:
-        build_workfile_template(workfile_creation_enabled=True)
-    except TemplateProfileNotFound:
-        log.warning("Template profile not found. Skipping...")
+        if not dialog.exec_():
+            return None
+
+        options = dialog.get_values()
+
+        settings = WorkfileSettings()
+        if options.get("resolution"):
+            settings.reset_resolution()
+        if options.get("frame_range_fps"):
+            settings.reset_frame_range_handles()
+        if options.get("colorspace"):
+            settings.set_colorspace()
+        if options.get("instances"):
+            update_content_on_context_change()
+    finally:
+        dialog.deleteLater()
 
 
 def add_scripts_menu():
@@ -3006,25 +3212,6 @@ def get_viewer_config_from_string(input_string):
     return (display, viewer)
 
 
-def create_viewer_profile_string(viewer, display=None, path_like=False):
-    """Convert viewer and display to string
-
-    Args:
-        viewer (str): viewer name
-        display (Optional[str]): display name
-        path_like (Optional[bool]): if True, return path like string
-
-    Returns:
-        str: viewer config string
-    """
-    if not display:
-        return viewer
-
-    if path_like:
-        return "{}/{}".format(display, viewer)
-    return "{} ({})".format(viewer, display)
-
-
 def get_filenames_without_hash(filename, frame_start, frame_end):
     """Get filenames without frame hash
         i.e. "renderCompositingMain.baking.0001.exr"
@@ -3051,19 +3238,14 @@ def get_filenames_without_hash(filename, frame_start, frame_end):
 
 def create_camera_node_by_version():
     """Function to create the camera with the latest node class
+
     For Nuke version 14.0 or later, the Camera4 camera node class
-        would be used
-    For the version before, the Camera2 camera node class
-        would be used
+        would be used. We've dropped support folder older Nuke versions.
+
     Returns:
         Node: camera node
     """
-    nuke_number_version = nuke.NUKE_VERSION_MAJOR
-    if nuke_number_version >= 14:
-        return nuke.createNode("Camera4")
-    else:
-        return nuke.createNode("Camera2")
-
+    return nuke.createNode("Camera4")
 
 def link_knobs(knobs, node, group_node):
     """Link knobs from inside `group_node`"""

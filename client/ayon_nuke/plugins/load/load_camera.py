@@ -8,12 +8,11 @@ from ayon_core.pipeline import (
 from ayon_nuke.api import (
     containerise,
     update_container,
-    viewer_update_and_undo_stop
 )
+from ayon_nuke.api.command import knob_values, undo_chunk
 from ayon_nuke.api.lib import (
     maintained_selection
 )
-
 
 class AlembicCameraLoader(load.LoaderPlugin):
     """
@@ -33,6 +32,7 @@ class AlembicCameraLoader(load.LoaderPlugin):
     color = "orange"
     node_color = "0x3469ffff"
 
+    @undo_chunk("Load Alembic Camera")
     def load(self, context, name, namespace, data):
         # get main variables
         version_entity = context["version"]
@@ -51,9 +51,9 @@ class AlembicCameraLoader(load.LoaderPlugin):
             "frameStart": first,
             "frameEnd": last,
             "version": version_entity["version"],
+            "source": version_attributes["source"],
+            "fps": version_attributes["fps"]
         }
-        for k in ["source", "fps"]:
-            data_imprint[k] = version_attributes[k]
 
         # getting file path
         file = self.filepath_from_context(context).replace("\\", "/")
@@ -63,34 +63,22 @@ class AlembicCameraLoader(load.LoaderPlugin):
             try:
                 camera_node = nuke.createNode(
                     "Camera3",
-                    "name {} file {} read_from_file True".format(
-                        object_name, file),
+                    f"name {object_name}",
                     inpanel=False,
                 )
             except RuntimeError: # older nuke version
                 camera_node = nuke.createNode(
                     "Camera2",
-                    "name {} file {} read_from_file True".format(
-                        object_name, file),
+                    f"name {object_name}",
                     inpanel=False,
                 )
 
-            # get the actual name of the camera node
-            # might be different if a the desired name is already in use
-            object_name = camera_node.name()
-
-            camera_node.forceValidate()
+        with knob_values({
+            camera_node["suppress_dialog"]: True,
+        }):
+            camera_node["read_from_file"].setValue(True)
+            camera_node["file"].setValue(file)  # set file after making sure "read_from_file" is True  # noqa: E501
             camera_node["frame_rate"].setValue(float(fps))
-
-            # workaround because nuke's bug is not adding
-            # animation keys properly
-            xpos = camera_node.xpos()
-            ypos = camera_node.ypos()
-            nuke.nodeCopy("%clipboard%")
-            nuke.delete(camera_node)
-            nuke.nodePaste("%clipboard%")
-            camera_node = nuke.toNode(object_name)
-            camera_node.setXYpos(xpos, ypos)
 
         # color node by correct color by actual version
         self.node_version_color(
@@ -105,6 +93,7 @@ class AlembicCameraLoader(load.LoaderPlugin):
             loader=self.__class__.__name__,
             data=data_imprint)
 
+    @undo_chunk("Update Alembic Camera")
     def update(self, container, context):
         """
             Called by Scene Inventory when look should be updated to current
@@ -136,47 +125,22 @@ class AlembicCameraLoader(load.LoaderPlugin):
             "representation": repre_entity["id"],
             "frameStart": first,
             "frameEnd": last,
-            "version": version_entity["version"]
+            "version": version_entity["version"],
+            "source": version_attributes["source"],
+            "fps": version_attributes["fps"],
+            "project_name": context["project"]["name"],
         }
-
-        # add attributes from the version to imprint to metadata knob
-        for k in ["source", "fps"]:
-            data_imprint[k] = version_attributes[k]
 
         # getting file path
         file = get_representation_path(repre_entity).replace("\\", "/")
 
-        with maintained_selection():
-            camera_node = container["node"]
-            camera_node['selected'].setValue(True)
-
-            # collect input output dependencies
-            dependencies = camera_node.dependencies()
-            dependent = camera_node.dependent()
-
-            camera_node["frame_rate"].setValue(float(fps))
+        camera_node = container["node"]
+        with knob_values({
+            camera_node["suppress_dialog"]: True,
+        }):
+            camera_node["read_from_file"].setValue(True)
             camera_node["file"].setValue(file)
-
-            # workaround because nuke's bug is
-            # not adding animation keys properly
-            xpos = camera_node.xpos()
-            ypos = camera_node.ypos()
-            nuke.nodeCopy("%clipboard%")
-            camera_name = camera_node.name()
-            nuke.delete(camera_node)
-            nuke.nodePaste("%clipboard%")
-            camera_node = nuke.toNode(camera_name)
-            camera_node.setXYpos(xpos, ypos)
-
-            # link to original input nodes
-            for i, input in enumerate(dependencies):
-                camera_node.setInput(i, input)
-            # link to original output nodes
-            for d in dependent:
-                index = next((i for i, dpcy in enumerate(
-                              d.dependencies())
-                              if camera_node is dpcy), 0)
-                d.setInput(index, camera_node)
+            camera_node["frame_rate"].setValue(float(fps))
 
         # color node by correct color by actual version
         self.node_version_color(
@@ -207,10 +171,10 @@ class AlembicCameraLoader(load.LoaderPlugin):
     def switch(self, container, context):
         self.update(container, context)
 
+    @undo_chunk("Remove Alembic Camera")
     def remove(self, container):
         node = container["node"]
-        with viewer_update_and_undo_stop():
-            nuke.delete(node)
+        nuke.delete(node)
 
 
 class FbxCameraLoader(AlembicCameraLoader):
@@ -228,7 +192,7 @@ class FbxCameraLoader(AlembicCameraLoader):
         # https://learn.foundry.com/nuke/11.1/content/comp_environment
         # /3d_compositing/importing_fbx_cameras.html
         # The following ensure the camera node is set to exported camera data.
-        fbx_camera_node.forceValidate() 
+        fbx_camera_node.forceValidate()
 
         try:
             knob = fbx_camera_node["fbx_take_name"]
@@ -239,7 +203,7 @@ class FbxCameraLoader(AlembicCameraLoader):
             # very well when mixing abc + fbx nodes in the same script.
             # They need to reloaded manually.
             #
-            # Hopefully this will be fixed by upcoming Camera4            
+            # Hopefully this will be fixed by upcoming Camera4
             raise RuntimeError(
                 "Could not load incoming FBX camera properly. "
                 "This could be caused by a mix of abc and fbx "

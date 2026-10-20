@@ -9,8 +9,8 @@ from ayon_nuke.api.lib import get_avalon_knob_data
 from ayon_nuke.api import (
     containerise,
     update_container,
-    viewer_update_and_undo_stop
 )
+from ayon_nuke.api.command import undo_chunk
 
 
 class LinkAsGroup(load.LoaderPlugin):
@@ -28,6 +28,7 @@ class LinkAsGroup(load.LoaderPlugin):
     icon = "file"
     color = "#cc0000"
 
+    @undo_chunk("Load Precomp")
     def load(self, context, name, namespace, data):
         # for k, v in context.items():
         #     log.info("key: `{}`, value: {}\n".format(k, v))
@@ -80,8 +81,7 @@ class LinkAsGroup(load.LoaderPlugin):
 
         with P:
             # iterate through all nodes in group node and find AYON writes
-            writes = [n.name() for n in nuke.allNodes()
-                      if n.Class() == "Group"
+            writes = [n.name() for n in nuke.allNodes(filter="Group")
                       if get_avalon_knob_data(n)]
 
             if writes:
@@ -107,6 +107,7 @@ class LinkAsGroup(load.LoaderPlugin):
     def switch(self, container, context):
         self.update(container, context)
 
+    @undo_chunk("Update Precomp")
     def update(self, container, context):
         """Update the Loader's path
 
@@ -133,6 +134,7 @@ class LinkAsGroup(load.LoaderPlugin):
             "colorspace": version_attributes.get("colorSpace"),
             "source": version_attributes.get("source"),
             "fps": version_attributes.get("fps"),
+            "project_name": project_name,
         }
 
         # Update the imprinted representation
@@ -157,7 +159,7 @@ class LinkAsGroup(load.LoaderPlugin):
             "updated to version: {}".format(version_entity["version"])
         )
 
+    @undo_chunk("Remove Precomp")
     def remove(self, container):
         node = container["node"]
-        with viewer_update_and_undo_stop():
-            nuke.delete(node)
+        nuke.delete(node)

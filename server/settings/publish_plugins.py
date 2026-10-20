@@ -142,6 +142,25 @@ class ReformatNodesConfigModel(BaseSettingsModel):
     )
 
 
+class WriteKnobsModel(BaseSettingsModel):
+    file_type: str = SettingsField(default="mov", title="File type")
+    custom: list[KnobModel] = SettingsField(
+        title="Additional Knobs",
+        default=[
+            KnobModel(
+                type="text",
+                name="mov64_codec",
+                text="ap4h",
+            ),
+            KnobModel(
+                type="boolean",
+                name="mov64_write_timecode",
+                boolean=True,
+            )
+        ]
+    )
+
+
 class IntermediateOutputModel(BaseSettingsModel):
     name: str = SettingsField(title="Output name")
     publish: bool = SettingsField(
@@ -152,6 +171,13 @@ class IntermediateOutputModel(BaseSettingsModel):
         title="Filter", default_factory=BakingStreamFilterModel
     )
     read_raw: bool = SettingsField(False, title="Input read node RAW switch")
+    write_knobs: WriteKnobsModel = SettingsField(
+        default_factory=WriteKnobsModel,
+        title="Write Knobs",
+        description=(
+            "Configure knobs on the output write node"
+        )
+    )
     bake_viewer_process: bool = SettingsField(
         True,
         title="Bake viewer process",
@@ -168,18 +194,20 @@ class IntermediateOutputModel(BaseSettingsModel):
         section="Baking additional",
     )
     reformat_nodes_config: ReformatNodesConfigModel = SettingsField(
-        default_factory=ReformatNodesConfigModel, title="Reformat Nodes"
-    )
-    extension: str = SettingsField("mov", title="File extension")
+        default_factory=ReformatNodesConfigModel,
+        title="Reformat Nodes")
+
     add_custom_tags: list[str] = SettingsField(
-        title="Custom tags", default_factory=list
+        title="Custom tags",
+        default_factory=list,
+        section="Representation definition",
     )
 
     fill_missing_frames: str = SettingsField(
         title="Handle missing frames",
         default="0",
         description="What to do about missing frames from entity frame range."
-        "Used for filling gaps for Custom Frames",
+                    "Used for filling gaps for Custom Frames",
         enum_resolver=_handle_missing_frames_enum,
     )
 
@@ -236,10 +264,12 @@ class ExtractSlateFrameModel(BaseSettingsModel):
 
 
 class PublishPluginsModel(BaseSettingsModel):
-    CollectSyncWorkfileVersion: CollectSyncWorkfileVersionModel = SettingsField(
-        title="Collect Sync Workfile Version",
-        default_factory=CollectSyncWorkfileVersionModel,
-        section="Collectors"
+    CollectSyncWorkfileVersion: CollectSyncWorkfileVersionModel = (
+        SettingsField(
+            title="Collect Sync Workfile Version",
+            default_factory=CollectSyncWorkfileVersionModel,
+            section="Collectors",
+        )
     )
     ValidateCorrectAssetContext: OptionalPluginModel = SettingsField(
         title="Validate Correct Folder Name",
@@ -251,6 +281,22 @@ class PublishPluginsModel(BaseSettingsModel):
     )
     ValidateOutputResolution: OptionalPluginModel = SettingsField(
         title="Validate Output Resolution", default_factory=OptionalPluginModel
+    )
+    ValidateExposedKnobs: OptionalPluginModel = SettingsField(
+        title="Validate Exposed Knobs",
+        default_factory=OptionalPluginModel
+    )
+    ValidateProxyMode: OptionalPluginModel = SettingsField(
+        title="Validate Proxy Mode",
+        default_factory=OptionalPluginModel
+    )
+    ValidateRenderedFrames: OptionalPluginModel = SettingsField(
+        title="Validate Rendered Frames",
+        default_factory=OptionalPluginModel
+    )
+    ValidateNukeWriteNode: OptionalPluginModel = SettingsField(
+        title="Validate Nuke Write Node",
+        default_factory=OptionalPluginModel
     )
     ValidateGizmo: OptionalPluginModel = SettingsField(
         title="Validate Gizmo", default_factory=OptionalPluginModel
@@ -340,7 +386,37 @@ DEFAULT_PUBLISH_PLUGIN_SETTINGS = {
     "ValidateOutputResolution": {
         "enabled": True,
         "optional": True,
-        "active": True,
+        "active": True
+    },
+    "ValidateExposedKnobs": {
+        "enabled": True,
+        "optional": False,  # match how it was before it was made optional
+        "active": True
+    },
+    "ValidateProxyMode": {
+        "enabled": True,
+        "optional": False,  # match how it was before it was made optional
+        "active": True
+    },
+    "ValidateRenderedFrames": {
+        "enabled": True,
+        "optional": False,  # match how it was before it was made optional
+        "active": True
+    },
+    "ValidateNukeWriteNode": {
+        "enabled": True,
+        "optional": False,  # match how it was before it was made optional
+        "active": True
+    },
+    "ValidateGizmo": {
+        "enabled": True,
+        "optional": True,
+        "active": True
+    },
+    "ValidateBackdrop": {
+        "enabled": True,
+        "optional": True,
+        "active": True
     },
     "ValidateGizmo": {"enabled": True, "optional": True, "active": True},
     "ValidateBackdrop": {"enabled": True, "optional": True, "active": True},
@@ -406,7 +482,21 @@ DEFAULT_PUBLISH_PLUGIN_SETTINGS = {
                         }
                     ],
                 },
-                "extension": "mov",
+                "write_knobs": {
+                    "file_type": "mov",
+                    "custom": [
+                        {
+                            "type": "text",
+                            "name": "mov64_codec",
+                            "text": "ap4h",
+                        },
+                        {
+                            "type": "boolean",
+                            "name": "mov64_write_timecode",
+                            "boolean": True,
+                        },
+                    ],
+                },
                 "add_custom_tags": [],
                 "fill_missing_frames": "0",
             }

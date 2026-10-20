@@ -1,3 +1,4 @@
+
 import nuke
 import re
 import os
@@ -30,7 +31,6 @@ from .lib import (
     INSTANCE_DATA_KNOB,
     Knobby,
     create_backdrop,
-    deprecated,
     maintained_selection,
     get_avalon_knob_data,
     set_node_knobs_from_settings,
@@ -41,6 +41,7 @@ from .lib import (
     get_work_default_directory,
     link_knobs,
     get_version_from_path,
+    convert_knob_value_to_correct_type,
 )
 from .pipeline import (
     list_instances,
@@ -48,7 +49,7 @@ from .pipeline import (
     containerise,
     update_container,
 )
-from .command import viewer_update_and_undo_stop
+from .command import undo_chunk
 from .colorspace import (
     get_formatted_display_and_view_as_dict,
     get_formatted_colorspace,
@@ -101,9 +102,6 @@ class NukeCreator(Creator):
         """
 
         for node in nuke.allNodes(recurseGroups=True):
-            # make sure testing node is having instance knob
-            if INSTANCE_DATA_KNOB not in node.knobs().keys():
-                continue
             node_data = get_node_data(node, INSTANCE_DATA_KNOB)
 
             if not node_data:
@@ -318,11 +316,14 @@ class NukeWriteCreator(NukeCreator):
     product_base_type = "write"
     icon = "sign-out"
 
-    temp_rendering_path_template = (  # default to be applied if settings is missing
-        "{work}/renders/nuke/{product[name]}/{product[name]}.{frame}.{ext}"
-    )
+    # default to be applied if settings is missing
+    temp_rendering_path_template = (
+        "{work}/renders/nuke/{product[name]}/{product[name]}.{frame}.{ext}")
 
     render_target = "local"  # default to be applied if settings is missing
+
+    # conditional reviewable
+    conditional_reviewable = {}
 
     def get_linked_knobs(self):
         linked_knobs = []
@@ -370,7 +371,8 @@ class NukeWriteCreator(NukeCreator):
             list[nuke.Node]: node selection.
 
         Raises:
-            NukeCreatorError. When the selection contains more than 1 Write node.
+            NukeCreatorError:
+                When the selection contains more than 1 Write node.
         """
         if not pre_create_data.get("use_selection"):
             return []
@@ -435,7 +437,10 @@ class NukeWriteCreator(NukeCreator):
 
         return attrs_defs
 
-    def get_instance_attr_defs(self):
+    def get_attr_defs_for_instance(self, instance):
+        if instance.get("creator_identifier") != self.identifier:
+            return []
+
         attr_defs = [self._get_render_target_enum()]
 
         # add reviewable attribute
@@ -471,8 +476,49 @@ class NukeWriteCreator(NukeCreator):
                     label="Debug local review generation",
                 )
             )
+        if "conditional_reviewable" in self.instance_attributes:
+            is_review_enabled = self._is_review_enabled(instance)
+            tooltip = (
+                "Review is always enabled for this task type"
+                " (set by studio settings)."
+            )
+            attr_defs.append(
+                BoolDef(
+                    "review",
+                    default=is_review_enabled,
+                    label="Review",
+                    tooltip=tooltip if is_review_enabled else "",
+                    visible=is_review_enabled,
+                )
+            )
+        if "slate_gen" in self.instance_attributes:
+            attr_defs.append(
+                BoolDef(
+                    "slate_gen",
+                    default=True,
+                    label="Slate Generation"
+                )
+            )
 
         return attr_defs
+
+    def _is_review_enabled(self, instance)-> bool:
+        """Return whether the Review toggle is enabled for the
+        current task type.
+
+        The Review toggle is enabled when the current task type is included in
+        ``conditional_reviewable``.
+        """
+        reviewable_task_types = self.conditional_reviewable.get("task_types")
+        if not reviewable_task_types:
+            return True
+        folder_path = instance.get("folderPath")
+        task_name = instance.get("task")
+        task_entity = self.create_context.get_task_entity(
+            folder_path, task_name
+        )
+        task_type = task_entity.get("taskType")
+        return bool(task_type in reviewable_task_types)
 
     def _get_render_target_enum(self):
         rendering_targets = {
@@ -562,9 +608,13 @@ class NukeWriteCreator(NukeCreator):
             or self.temp_rendering_path_template
         )
         # individual attributes
-        self.instance_attributes = (
-            plugin_settings.get("instance_attributes")
-            or self.instance_attributes
+        self.instance_attributes = plugin_settings.get(
+            "instance_attributes") or self.instance_attributes
+        # conditional reviewable
+        self.conditional_reviewable = plugin_settings.get(
+            "conditional_reviewable") or self.conditional_reviewable
+        self.conditional_reviewable = plugin_settings.get(
+            "conditional_reviewable", []
         )
         self.prenodes = plugin_settings["prenodes"]
         self.default_variants = (
@@ -592,12 +642,6 @@ def get_instance_group_node_children(instance):
         return []
 
     return node.nodes()
-
-
-# alias for backwards compatibility
-@deprecated("ayon_nuke.api.plugin.get_instance_group_node_children")
-def get_instance_group_node_childs(instance):
-    return get_instance_group_node_children(instance)
 
 
 def get_colorspace_from_node(node):
@@ -638,7 +682,7 @@ class NukeLoader(LoaderPlugin):
         )
 
     def get_container_id(self, node):
-        id_knob = node.knobs().get(self.container_id_knob)
+        id_knob = node.knob(self.container_id_knob)
         return id_knob.value() if id_knob else None
 
     def get_members(self, source):
@@ -741,6 +785,7 @@ class NukeGroupLoader(LoaderPlugin):
             "Group", "name {}_1".format(object_name), inpanel=False
         )
 
+    @undo_chunk("Load Group")
     def load(self, context, name=None, namespace=None, options=None):
         """
         Loading function to get the soft effects to particular read node
@@ -778,6 +823,7 @@ class NukeGroupLoader(LoaderPlugin):
             data=data_imprint,
         )
 
+    @undo_chunk("Update Group")
     def update(self, container, context):
         """Update the Loader's path
 
@@ -806,10 +852,10 @@ class NukeGroupLoader(LoaderPlugin):
     def switch(self, container, context):
         self.update(container, context)
 
+    @undo_chunk("Remove Group")
     def remove(self, container):
         node = container["node"]
-        with viewer_update_and_undo_stop():
-            nuke.delete(node)
+        nuke.delete(node)
 
     def connect_active_viewer(self, group_node):
         """
@@ -883,7 +929,7 @@ class NukeGroupLoader(LoaderPlugin):
             "source",
             "fps",
         ]:
-            data[k] = version_attributes[k]
+            data[k] = version_attributes.get(k)
 
         for key, value in dict(**data).items():
             if value is None:
@@ -1040,19 +1086,17 @@ class ExporterReview(object):
             root_version = int(root_version)
         except (TypeError, IndexError):
             self.log.warning(
-                f"Current file '{current_file}' doesn't contain version number. "
-                "No replacement necessary",
-                exc_info=True,
-            )
+                f"Current file '{current_file}' doesn't contain version "
+                "number. No replacement necessary",
+                exc_info=True)
             return staging_dir
         try:
             staging_dir_version = "v" + get_version_from_path(staging_dir)
         except (TypeError, IndexError):
             self.log.warning(
-                f"Staging directory '{staging_dir}' doesn't contain version number. "
-                "No replacement necessary",
-                exc_info=True,
-            )
+                f"Staging directory '{staging_dir}' doesn't contain version "
+                "number. No replacement necessary",
+                exc_info=True)
             return staging_dir
 
         new_version = "v" + str("{" + ":0>{}".format(padding) + "}").format(
@@ -1198,9 +1242,13 @@ class ExporterReviewMov(ExporterReview):
 
     _temp_nodes = {}
 
-    def __init__(
-        self, klass, instance, name=None, ext=None, multiple_presets=True
-    ):
+    def __init__(self,
+                 klass,
+                 instance,
+                 name=None,
+                 write_knobs=None,
+                 multiple_presets=True
+                 ):
         # initialize parent class
         super(ExporterReviewMov, self).__init__(
             klass, instance, multiple_presets
@@ -1213,9 +1261,9 @@ class ExporterReviewMov(ExporterReview):
         self.write_colorspace = instance.data["colorspace"]
         self.color_channels = instance.data["color_channels"]
         self.formatting_data = instance.data["anatomyData"]
-
+        self.custom_write_knobs = write_knobs["custom"]
         self.name = name or "baked"
-        self.ext = ext or "mov"
+        self.ext = write_knobs["file_type"]
 
         # set frame start / end and file name to self
         self.get_file_info()
@@ -1307,6 +1355,10 @@ class ExporterReviewMov(ExporterReview):
         # Read node
         r_node = nuke.createNode("Read")
         r_node["file"].setValue(self.path_in)
+        # do not use the localized files when publishing,
+        # use the original files, because Nuke may think the
+        # cached localized files are still up-to-date and use them
+        r_node["localizationPolicy"].setValue(3)
         r_node["first"].setValue(self.first_frame)
         r_node["origfirst"].setValue(self.first_frame)
         r_node["last"].setValue(self.last_frame)
@@ -1321,7 +1373,6 @@ class ExporterReviewMov(ExporterReview):
 
         if read_raw:
             r_node["raw"].setValue(1)
-
         # connect to Read node
         self._shift_to_previous_node_and_temp(
             product_name, r_node, "Read...   `{}`"
@@ -1383,7 +1434,8 @@ class ExporterReviewMov(ExporterReview):
                     )
                     if not baking_colorspace:
                         raise ValueError(
-                            f"Invalid baking color space: '{baking_colorspace}'"
+                            "Invalid baking color space: "
+                            f"'{baking_colorspace}'"
                         )
                     node = nuke.createNode("OCIOColorSpace")
                     message = "OCIOColorSpace...   '{}'"
@@ -1421,30 +1473,9 @@ class ExporterReviewMov(ExporterReview):
         # Write node
         write_node = nuke.createNode("Write")
         self.log.debug(f"Path: {self.path}")
-
         write_node["file"].setValue(str(self.path))
-        write_node["file_type"].setValue(str(self.ext))
-        write_node["channels"].setValue(str(self.color_channels))
-
-        # Knobs `meta_codec` and `mov64_codec` are not available on centos.
-        # TODO shouldn't this come from settings on outputs?
-        try:
-            write_node["meta_codec"].setValue("ap4h")
-        except Exception:
-            self.log.info("`meta_codec` knob was not found")
-
-        try:
-            write_node["mov64_codec"].setValue("ap4h")
-            write_node["mov64_fps"].setValue(float(fps))
-        except Exception:
-            self.log.info("`mov64_codec` knob was not found")
-
-        try:
-            write_node["mov64_write_timecode"].setValue(1)
-        except Exception:
-            self.log.info("`mov64_write_timecode` knob was not found")
-
-        write_node["raw"].setValue(1)
+        self._set_write_node_defaults(write_node, fps)
+        self._set_custom_knobs(write_node, self.custom_write_knobs, self.log)
 
         # connect
         write_node.setInput(0, self.previous_node)
@@ -1464,7 +1495,11 @@ class ExporterReviewMov(ExporterReview):
 
         # ---------- render or save to nk
         if self.publish_on_farm:
-            nuke.scriptSave()
+            # Save in place then copy as a separate workfile so the baked
+            # content get saved without touching Nuke current root instance.
+            # Cannot use nuke.scriptSave(), it has no effect in terminal mode.
+            nuke.scriptSaveAs(
+                self.instance.context.data["currentFile"], overwrite=1)
             path_nk = self.save_file()
             self.data.update(
                 {
@@ -1495,8 +1530,9 @@ class ExporterReviewMov(ExporterReview):
         self.log.debug(f"Representation...   `{self.data}`")
 
         self.clean_nodes(product_name)
-
-        nuke.scriptSave()
+        # Commit to cleaned workfile + session.
+        nuke.scriptSaveAs(
+            self.instance.context.data["currentFile"], overwrite=1)
 
         return self.data
 
@@ -1508,6 +1544,45 @@ class ExporterReviewMov(ExporterReview):
     def _connect_to_above_nodes(self, node, product_name, message):
         node.setInput(0, self.previous_node)
         self._shift_to_previous_node_and_temp(product_name, node, message)
+
+    def _set_write_node_defaults(self, write_node, fps) -> None:
+        """Set default write node configuration.
+
+        Args:
+            write_node: The write node to configure.
+            fps: Frames per second for the write node.
+        """
+        write_node["file_type"].setValue(str(self.ext))
+        write_node["channels"].setValue(str(self.color_channels))
+        write_node["raw"].setValue(1)
+        mov64_fps_knob = write_node.knob("mov64_fps")
+        if mov64_fps_knob is not None:
+            mov64_fps_knob.setValue(float(fps))
+
+    def _set_custom_knobs(self, write_node, custom_knobs, log) -> None:
+        """Set custom knobs on the write node.
+
+        Args:
+            write_node: The write node to configure.
+            custom_knobs: List of custom knob configurations.
+            log: Logger for logging warnings and information.
+        """
+        if not custom_knobs:
+            return
+
+        for knob in custom_knobs:
+            to_type = knob["type"]
+            value = convert_knob_value_to_correct_type(
+                to_type, knob[to_type]
+            )
+            name = knob["name"]
+            if name not in write_node.knobs():
+                log.warning(
+                    f"Knob '{name}' does not exist on the write node. "
+                    "Skipping setting this knob."
+                )
+                continue
+            write_node[name].setValue(value)
 
 
 def convert_to_valid_instaces():
@@ -1593,15 +1668,18 @@ def convert_to_valid_instaces():
         # establish families
         families_ak = avalon_knob_data.get("families", [])
 
-        if "suspend_publish" in node.knobs():
-            creator_attr["suspended_publish"] = node["suspend_publish"].value()
+        if node.knob("suspend_publish") is not None:
+            creator_attr["suspended_publish"] = (
+                node["suspend_publish"].value())
 
         # get review knob value
-        if "review" in node.knobs():
-            creator_attr["review"] = node["review"].value()
+        if node.knob("review") is not None:
+            creator_attr["review"] = (
+                node["review"].value())
 
-        if "publish" in node.knobs():
-            transfer_data["active"] = node["publish"].value()
+        if node.knob("publish") is not None:
+            transfer_data["active"] = (
+                node["publish"].value())
 
         # add identifier
         transfer_data["creator_identifier"] = product_base_type_to_identifier(
@@ -1622,18 +1700,15 @@ def convert_to_valid_instaces():
                     # Farm rendering
                     creator_attr["render_target"] = "farm"
 
-                if "deadlinePriority" in node.knobs():
-                    transfer_data["farm_priority"] = node[
-                        "deadlinePriority"
-                    ].value()
-                if "deadlineChunkSize" in node.knobs():
-                    creator_attr["farm_chunk"] = node[
-                        "deadlineChunkSize"
-                    ].value()
-                if "deadlineConcurrentTasks" in node.knobs():
-                    creator_attr["farm_concurrency"] = node[
-                        "deadlineConcurrentTasks"
-                    ].value()
+                if node.knob("deadlinePriority") is not None:
+                    transfer_data["farm_priority"] = (
+                        node["deadlinePriority"].value())
+                if node.knob("deadlineChunkSize") is not None:
+                    creator_attr["farm_chunk"] = (
+                        node["deadlineChunkSize"].value())
+                if node.knob("deadlineConcurrentTasks") is not None:
+                    creator_attr["farm_concurrency"] = (
+                        node["deadlineConcurrentTasks"].value())
 
         _remove_old_knobs(node)
 
