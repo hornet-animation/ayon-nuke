@@ -165,10 +165,12 @@ def _root_block():
     """Root { ... } built from the live root, keeping its name so
     [value root.name] and project-relative paths resolve as in the session."""
     knobs = nuke.root().writeKnobs(nuke.WRITE_NON_DEFAULT_ONLY | nuke.TO_SCRIPT)
-    lines = ["Root {", " inputs 0"]
-    lines.extend(" " + l for l in knobs.splitlines() if l.strip())
-    lines.append("}")
-    return lines
+    # Emit Nuke's knob text VERBATIM. Values can span lines inside quotes --
+    # Root's `views` is "white #ffffff\noffWhite #ffffff" -- so re-indenting
+    # or filtering per line edits the value itself: indenting turned the
+    # second view into " offWhite" and every Write rendering offWhite failed
+    # on the farm with "Bad value for view".
+    return ["Root {", " inputs 0", knobs.rstrip("\n"), "}"]
 
 
 def _copy_nodes(tops):
@@ -252,8 +254,9 @@ def build_sanitised_script(start, keep=None):
 
     out = ["#! %s -nx" % nuke.EXE_PATH]
     out.append(version_line or "version %s" % nuke.NUKE_VERSION_STRING)
-    out.extend(_add_layer_lines())
+    # Same order Nuke saves in: Root first, then layer definitions.
     out.extend(_root_block())
+    out.extend(_add_layer_lines())
     out.append(text_body)
     return "\n".join(out) + "\n", closure
 
