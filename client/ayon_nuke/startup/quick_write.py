@@ -2531,9 +2531,22 @@ def _confirm_render_exists(node):
     out_knob = get_file_output_knob(node)
     if out_knob is None:
         return True
-    path = out_knob.evaluate() or out_knob.value()
-    if not path:
+    # Build the glob from the RAW path: Nuke 17's evaluate() expands the frame
+    # token to the current frame (e.g. .0025.dpx), so an evaluated path only
+    # ever matches one frame and reported "no frames" for a valid render
+    # whenever the playhead sat outside it. Only evaluate when the path holds
+    # TCL, and then wildcard the frame number evaluate() filled in.
+    raw = out_knob.value() or ""
+    if not raw:
         return True
+    if "[" in raw:
+        try:
+            evaluated = out_knob.evaluate() or raw
+        except Exception:
+            evaluated = raw
+        path = re.sub(r"\d+(?=\.[A-Za-z0-9]+$)", "*", evaluated)
+    else:
+        path = raw
 
     # Turn the frame-numbered output path into a glob and see if anything exists.
     glob_pattern = re.sub(r"%0?\d*d", "*", path)
