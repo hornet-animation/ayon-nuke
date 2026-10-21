@@ -42,7 +42,7 @@ QUICK_WRITE_DEFAULTS = {
     "deadlineGroup": "nuke",
     "deadlineGroupFilter": "nuke",  # filter for the Group dropdown; "" = show all
     "generate_review_media": True,
-    "burnin": True,
+    "burnin": False,
     "publish_on_farm": False,
     "compression": "DWAA",   # EXR compression; prefix-matched ("DWAA", "PIZ", "Zip"); "" = leave Nuke's default
 }

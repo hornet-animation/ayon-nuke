@@ -136,7 +136,7 @@ _QW_DEFAULTS = {
     # substring); "" shows every group. No match -> the full list.
     "deadlineGroupFilter": "nuke",
     "generate_review_media": True,
-    "burnin": True,
+    "burnin": False,
     "publish_on_farm": False,
     # EXR compression applied to the interior Write whenever file_type becomes
     # exr (node creation included). Matched by prefix against Nuke's own
@@ -1276,8 +1276,9 @@ def embedOptions():
         - Publishing ovs renders will force increment your workfile.""",
     )
 
-    concurrent_warning = nuke.Text_Knob(
-        "concurrent_warning", "", "<-- Set to 1 for heavy scripts"
+    concurrentTasks.setTooltip(
+        "Tasks each Deadline worker renders at once. Set to 1 for heavy "
+        "scripts."
     )
     quick_publish_button = nuke.PyScript_Knob(
         "quick_publish",
@@ -1302,14 +1303,12 @@ def embedOptions():
     deadlinePriority.setFlag(nuke.STARTLINE)
     deadlineChunkSize.clearFlag(nuke.STARTLINE)  # Don't start a new line
     concurrentTasks.clearFlag(nuke.STARTLINE)
-    concurrent_warning.clearFlag(nuke.STARTLINE)
     deadlineGroup.clearFlag(nuke.STARTLINE)  # Pool and Group share a line
     deadlineGroupFilter.clearFlag(nuke.STARTLINE)  # filter sits beside Group
 
     group.addKnob(deadlinePriority)
     group.addKnob(deadlineChunkSize)
     group.addKnob(concurrentTasks)
-    group.addKnob(concurrent_warning)
     group.addKnob(deadlinePool)
     group.addKnob(deadlineGroup)
     group.addKnob(deadlineGroupFilter)
@@ -1531,10 +1530,8 @@ def embedOptions():
     )
     group.addKnob(show_instance_button)
 
-    try:
-        group["views"].setValue(nuke.views()[0])
-    except Exception as e:
-        print(f"Error setting views: {e}")
+    # views is left at the Write's own default rather than forced to the
+    # first view in the script.
 
     # Restore the settings that should survive a file_type change (frame range,
     # publish range, Deadline params, publish toggles) instead of resetting to
@@ -1555,12 +1552,9 @@ def embedOptions():
     # Orange warning after "Output" when the render path targets another shot.
     update_output_header_warning(group)
 
-    # The panel focuses whichever tab the last knob was added to -- the Info
-    # tab here. There's no API to pick the active tab, but a reopened panel
-    # always starts on the first tab, so cycle it (only if it's open).
-    if group.shown():
-        group.hideControlPanel()
-        group.showControlPanel()
+    # (A hide/show cycle used to sit here to land the panel back on its first
+    # tab; in Nuke 17 the re-show doesn't take, so changing file type closed
+    # the panel. The panel may now stay on the last-built tab instead.)
 
 
 
@@ -2453,7 +2447,18 @@ def get_latest_publish_version(node):
     project, product, folder_path = _publish_product_context(node)
     if not (project and product and folder_path):
         return 0, "v000"
-    return lib.get_server_pub_version(project, product, folder_path)
+    # Single-frame publishes go to "<product>_singleFrame" (see
+    # collect_nuke_instance_data), so check both and report the newer --
+    # otherwise a single-frame node always read v000.
+    best = (0, "v000")
+    for name in (product, product + "_singleFrame"):
+        try:
+            found = lib.get_server_pub_version(project, name, folder_path)
+        except Exception:
+            continue
+        if found and found[0] > best[0]:
+            best = found
+    return best
 
 
 def _update_publish_header_version(node):
