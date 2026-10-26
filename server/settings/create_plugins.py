@@ -27,6 +27,7 @@ INSTANCE_ATTRIBUTES_DESCRIPTION: str = (
     - Conditional Reviewable: When enabled, the output is marked as reviewable
     only under certain conditions.
     """
+)
 
 PRENODES_LIST_DESCRIPTION: str = (
     """List of nodes that should be added before the write node."""
